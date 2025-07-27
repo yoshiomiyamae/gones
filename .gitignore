@@ -1,0 +1,53 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+gones
+gones-*
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Build directory
+build/
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# ROM files (don't commit copyrighted ROMs)
+*.nes
+*.nez
+*.fds
+*.nsf
+
+# But keep test ROMs that are public domain or homebrew
+test/roms/*.nes
+!roms/homebrew/*.nes
+!roms/test/*.nes
+
+debug*
+headless_debug
+
+!cmd/*
