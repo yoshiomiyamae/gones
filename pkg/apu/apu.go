@@ -21,12 +21,16 @@ type APU struct {
 	DMC DMCChannel
 
 	// Frame counter
-	FrameCounter uint8
-	FrameStep    int
-	FrameIRQ     bool
+	FrameCounter     uint8
+	FrameStep        int
+	FrameIRQ         bool
+	FrameCycleCount  int // Counter for frame sequencer timing
 
 	// Cycle counter
 	Cycles uint64
+
+	// Sampling with fractional accumulation
+	SampleAccumulator float64 // Accumulator for precise sampling timing
 
 	// Output buffer
 	Output []float32
@@ -37,15 +41,16 @@ type APU struct {
 
 // PulseChannel represents a pulse wave channel
 type PulseChannel struct {
-	Enabled    bool
-	DutyCycle  uint8
-	Volume     uint8
-	Sweep      SweepUnit
-	Length     LengthCounter
-	Envelope   EnvelopeGenerator
-	Timer      uint16
-	TimerValue uint16
-	Sequence   uint8
+	Enabled       bool
+	DutyCycle     uint8
+	Volume        uint8
+	Sweep         SweepUnit
+	Length        LengthCounter
+	Envelope      EnvelopeGenerator
+	Timer         uint16
+	TimerValue    uint16
+	Sequence      uint8
+	SequencerStep int // Counter for half-speed clocking
 }
 
 // TriangleChannel represents the triangle wave channel
@@ -157,23 +162,35 @@ func (a *APU) Step() {
 	a.Cycles++
 
 	// Frame counter runs at 240Hz (CPU speed / 7457.5)
-	// Use more accurate timing with fractional accumulation
-	if a.Cycles%7458 == 0 {
+	a.FrameCycleCount++
+	if a.FrameCycleCount >= 7458 {
+		a.FrameCycleCount = 0
 		a.stepFrameCounter()
 	}
 
-	// Step audio channels
+	// Step audio channels - they use their own internal timers now
 	a.stepPulse(&a.Pulse1)
 	a.stepPulse(&a.Pulse2)
-	// Triangle channel steps at 1/4 rate - every 4th APU cycle (2 octaves lower)
 	a.stepTriangle()
 	a.stepNoise()
 	a.stepDMC()
 
-	// Generate audio sample - keep it simple
-	if a.Cycles%10 == 0 {
+	// Generate audio sample with precise fractional timing
+	// NES CPU frequency: 21.477272 MHz / 12 = 1.7897725 MHz (NTSC)
+	// Target sample rate: 44100 Hz
+	// Cycles per sample: 1789772.5 / 44100 = 40.5845578231293
+	const cyclesPerSample = 40.5845578231293
+	
+	a.SampleAccumulator += 1.0
+	if a.SampleAccumulator >= cyclesPerSample {
+		a.SampleAccumulator -= cyclesPerSample
 		sample := a.mixChannels()
 		a.Output = append(a.Output, sample)
+
+		// Debug: Log sample generation rate occasionally
+		if len(a.Output)%4410 == 0 { // Every 0.1 seconds worth of samples
+			// This helps verify we're generating the right number of samples
+		}
 
 		// Prevent buffer from growing too large
 		if len(a.Output) > 2048 {

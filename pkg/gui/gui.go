@@ -28,7 +28,9 @@ const (
 )
 
 var (
-	FrameTime = time.Duration(16639267) * time.Nanosecond // 16.639ms per frame for 60.0988 FPS
+	// NTSC NES frame rate: 60.0988 FPS (more precisely: 1789773 / 29780.5 = 60.0988139...)
+	// Frame time = 1,000,000,000 / 60.0988139 = 16,639,266.85 ns
+	FrameTime = time.Duration(16639267) * time.Nanosecond // 16.639267ms per frame
 )
 
 // NESGUI represents the GUI for the NES emulator
@@ -154,25 +156,43 @@ func (g *NESGUI) Destroy() {
 
 // Run starts the main GUI loop
 func (g *NESGUI) Run() {
+	frameCount := 0
+	startTime := time.Now()
+	
 	for g.running {
+		frameStart := time.Now()
+		
 		g.handleEvents()
 		g.update()
 		g.render()
 
-		// Precise frame rate limiting using target time
+		// Calculate target frame end time based on total elapsed time
+		// This compensates for Sleep() inaccuracies
+		frameCount++
+		targetEndTime := startTime.Add(time.Duration(frameCount) * FrameTime)
+		
 		now := time.Now()
-		if now.Before(g.nextFrameTime) {
-			time.Sleep(g.nextFrameTime.Sub(now))
+		if now.Before(targetEndTime) {
+			time.Sleep(targetEndTime.Sub(now))
 		}
-
-		// Set next frame time, ensuring consistent intervals
-		g.nextFrameTime = g.nextFrameTime.Add(FrameTime)
-
-		// If we're falling behind, reset to current time
-		if g.nextFrameTime.Before(time.Now()) {
-			g.nextFrameTime = time.Now().Add(FrameTime)
+		
+		// Debug: Log frame timing every 60 frames
+		if frameCount%60 == 0 {
+			actualFrameTime := time.Since(frameStart)
+			expectedFrameTime := FrameTime
+			deviation := float64(actualFrameTime-expectedFrameTime) / float64(expectedFrameTime) * 100
+			
+			// Also check average frame rate
+			avgFrameTime := time.Since(startTime) / time.Duration(frameCount)
+			avgDeviation := float64(avgFrameTime-expectedFrameTime) / float64(expectedFrameTime) * 100
+			
+			if deviation > 5 || deviation < -5 || avgDeviation > 2 || avgDeviation < -2 {
+				logger.LogInfo("Frame timing: actual=%.3fms, avg=%.3fms, expected=%.3fms, deviation=%.1f%%, avg_dev=%.1f%%",
+					actualFrameTime.Seconds()*1000, avgFrameTime.Seconds()*1000, 
+					expectedFrameTime.Seconds()*1000, deviation, avgDeviation)
+			}
 		}
-
+		
 		g.lastFrameTime = time.Now()
 	}
 }
@@ -228,8 +248,20 @@ func (g *NESGUI) handleKeyboard(event *sdl.KeyboardEvent) {
 
 // update runs the NES emulation for one frame
 func (g *NESGUI) update() {
+	// Track APU cycles before frame
+	apuCyclesBefore := g.nes.APU.Cycles
+	
 	// Run NES for one frame (approximately 29780 CPU cycles)
 	g.nes.StepFrame()
+	
+	// Debug: Log APU cycles per frame every 60 frames (BEFORE queueAudio clears the buffer)
+	if g.nes.Frame%60 == 0 && g.nes.Frame > 0 {
+		apuCyclesThisFrame := g.nes.APU.Cycles - apuCyclesBefore
+		samplesGenerated := len(g.nes.APU.Output)
+		// Expected: ~29780 cycles/frame, ~732 samples/frame at 44100 Hz
+		logger.LogInfo("Frame %d: APU cycles=%d (expected ~29780), samples=%d (expected ~732)", 
+			g.nes.Frame, apuCyclesThisFrame, samplesGenerated)
+	}
 
 	// Queue audio samples
 	g.queueAudio()
@@ -413,6 +445,12 @@ func (g *NESGUI) initAudio() error {
 
 	logger.LogInfo("Audio initialized: %dHz, %d channels, format 0x%x, buffer size %d",
 		have.Freq, have.Channels, have.Format, have.Samples)
+	
+	// IMPORTANT: Check if actual sample rate differs from requested
+	if have.Freq != AudioSampleRate {
+		logger.LogInfo("WARNING: Requested %d Hz but got %d Hz - audio pitch will be wrong!", 
+			AudioSampleRate, have.Freq)
+	}
 
 	// Start audio playback
 	sdl.PauseAudioDevice(device, false)
@@ -487,6 +525,16 @@ func (g *NESGUI) updateFPS() {
 	elapsed := time.Since(g.fpsTimer)
 	if elapsed >= 500*time.Millisecond {
 		g.currentFPS = float64(g.fpsCounter) / elapsed.Seconds()
+		
+		// Debug: Log if FPS is significantly off target
+		if g.fpsCounter%30 == 0 {
+			deviation := (g.currentFPS - TargetFPS) / TargetFPS * 100
+			if deviation > 5 || deviation < -5 {
+				logger.LogInfo("FPS: %.2f (target: %.2f, deviation: %.1f%%)", 
+					g.currentFPS, TargetFPS, deviation)
+			}
+		}
+		
 		g.fpsCounter = 0
 		g.fpsTimer = time.Now()
 	}

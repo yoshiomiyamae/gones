@@ -28,6 +28,9 @@ func (a *APU) writePulse(pulse *PulseChannel, reg uint16, value uint8) {
 		}
 		pulse.Envelope.Start = true
 		pulse.Sequence = 0
+		// Debug: Log timer value updates
+		// logger.LogInfo("Pulse timer set: TimerValue=%d, frequency=%.2f Hz", 
+		//	pulse.TimerValue, 1789773.0/(16.0*float64(pulse.TimerValue+1)))
 	}
 }
 

@@ -30,12 +30,23 @@ func (a *APU) stepPulse(pulse *PulseChannel) {
 		return
 	}
 
-	// Step timer
-	if pulse.Timer > 0 {
-		pulse.Timer--
-	} else {
-		pulse.Timer = pulse.TimerValue
-		pulse.Sequence = (pulse.Sequence + 1) % 8
+	// Pulse channels are clocked at CPU rate / 2
+	// This means the timer decrements every 2 CPU cycles
+	// Frequency formula: CPU_FREQ / (16 * (timer + 1))
+	
+	// Track whether to tick this cycle (every other cycle)
+	pulse.SequencerStep++
+	if pulse.SequencerStep >= 2 {
+		pulse.SequencerStep = 0
+		
+		// Decrement timer
+		// When timer is 0, reload and advance sequencer
+		if pulse.Timer == 0 {
+			pulse.Timer = pulse.TimerValue
+			pulse.Sequence = (pulse.Sequence + 1) % 8
+		} else {
+			pulse.Timer--
+		}
 	}
 }
 
@@ -45,19 +56,17 @@ func (a *APU) stepTriangle() {
 		return
 	}
 
-	// Step timer
-	if a.Triangle.Timer > 0 {
-		a.Triangle.Timer--
-	} else {
-		// Triangle channel: CPU_FREQ / (32 * (timer + 1))
-		// Pulse channel: CPU_FREQ / (16 * (timer + 1))
-		// Triangle should be 1 octave lower than pulse for same timer value
-		// But our current implementation makes them equal frequency
-		// Remove the frequency correction to match actual NES behavior
+	// Triangle channel timer counts down every CPU cycle
+	// Frequency = CPU_CLOCK / (32 * (t + 1))
+	
+	// When timer is 0, reload and advance sequencer
+	if a.Triangle.Timer == 0 {
 		a.Triangle.Timer = a.Triangle.TimerValue
 		if a.Triangle.Length.Value > 0 && a.Triangle.LinearCounter > 0 {
 			a.Triangle.Sequence = (a.Triangle.Sequence + 1) % 32
 		}
+	} else {
+		a.Triangle.Timer--
 	}
 }
 
