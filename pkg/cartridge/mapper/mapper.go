@@ -64,6 +64,8 @@ func NewMapper(mapperNumber uint8, data *CartridgeData) (Mapper, error) {
 		return NewMapper4(data), nil
 	case 10:
 		return NewMapper10(data), nil
+	case 70:
+		return NewMapper70(data), nil
 	default:
 		return nil, fmt.Errorf("unsupported mapper: %d", mapperNumber)
 	}

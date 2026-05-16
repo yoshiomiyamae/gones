@@ -22,20 +22,9 @@ func TestScanlineMidWrite(t *testing.T) {
 	}
 	fb := sys.GetDisplayFramebufferRaw()
 
-	// Determine the "background" colour as the most common pixel — the
-	// rest are foreground (text / stars / patterns).
-	hist := map[uint32]int{}
-	for _, p := range fb {
-		hist[p]++
-	}
-	var bg uint32
-	bestN := 0
-	for v, n := range hist {
-		if n > bestN {
-			bg = v
-			bestN = n
-		}
-	}
+	// Use the dominant pixel as the "background" baseline; the rest are
+	// foreground (text / stars / patterns).
+	_, bg, _ := frameHistogram(fb)
 
 	// Each test area covers 6 nametable rows × 8 scanlines = 48 scanlines.
 	// First test area starts at row 6 (scanline 48); rows 14-19 are test 2;
