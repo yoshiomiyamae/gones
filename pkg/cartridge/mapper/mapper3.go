@@ -8,11 +8,16 @@ import (
 // Mapper3 (CNROM) - Fixed PRG, 8KB CHR bank switching
 type Mapper3 struct {
 	cartridge *CartridgeData
-	
+
 	// Bank selection
 	chrBank      uint8 // Current CHR bank (0-3)
 	chrBankCount uint8 // Number of 8KB CHR banks
-	
+
+	// prgMask masks the $8000-offset address into the PRG ROM. $3FFF for
+	// 16KB carts (so $8000-$BFFF and $C000-$FFFF mirror), $7FFF for 32KB.
+	// Cached at construction to avoid a length-compare on every CPU fetch.
+	prgMask uint16
+
 	// Bus conflict behavior
 	busConflictMode uint8 // 0=unknown, 1=no conflicts, 2=AND-type conflicts
 }
@@ -24,27 +29,37 @@ func NewMapper3(data *CartridgeData) *Mapper3 {
 		chrBank:         0, // Start with bank 0
 		busConflictMode: 1, // Default to no conflicts for compatibility (submapper 1)
 	}
-	
+
 	// Calculate CHR bank count (8KB banks)
 	if len(data.CHRROM) > 0 {
 		m.chrBankCount = uint8(len(data.CHRROM) / 8192)
 	}
-	
+
+	switch len(data.PRGROM) {
+	case 16384:
+		m.prgMask = 0x3FFF
+	default:
+		m.prgMask = 0x7FFF
+	}
+
 	return m
 }
 
-// ReadPRG reads from PRG space (32KB fixed mapping)
+// ReadPRG reads from PRG space. 16KB CNROM carts mirror their PRG bank at
+// $8000-$BFFF and $C000-$FFFF (prgMask=$3FFF, set at construction);
+// otherwise the reset/NMI/IRQ vectors at $FFFA-$FFFF would fall outside
+// ROM and read as 0.
 func (m *Mapper3) ReadPRG(addr uint16) uint8 {
 	if addr >= 0x8000 {
-		// PRG ROM area - 32KB fixed mapping (CNROM specification)
-		addr -= 0x8000
-		if int(addr) < len(m.cartridge.PRGROM) {
-			return m.cartridge.PRGROM[addr]
+		offset := (addr - 0x8000) & m.prgMask
+		if int(offset) < len(m.cartridge.PRGROM) {
+			return m.cartridge.PRGROM[offset]
 		}
-	} else if addr >= 0x6000 {
+		return 0
+	}
+	if addr >= 0x6000 {
 		return readPRGRAM(m.cartridge, addr)
 	}
-
 	return 0
 }
 

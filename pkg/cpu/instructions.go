@@ -472,24 +472,22 @@ func getLoadCycles(mode AddressingMode) int {
 	}
 }
 
-// STA - Store Accumulator
+// STA - Store Accumulator. Uses getWriteAddress so indexed modes do the
+// real 6502 dummy read at the uncorrected target before writing.
 func (c *CPU) execSTA(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	c.write(addr, c.A)
+	c.write(c.getWriteAddress(mode), c.A)
 	return getStoreCycles(mode)
 }
 
 // STX - Store X Register
 func (c *CPU) execSTX(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	c.write(addr, c.X)
+	c.write(c.getWriteAddress(mode), c.X)
 	return getStoreCycles(mode)
 }
 
 // STY - Store Y Register
 func (c *CPU) execSTY(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	c.write(addr, c.Y)
+	c.write(c.getWriteAddress(mode), c.Y)
 	return getStoreCycles(mode)
 }
 

@@ -12,45 +12,73 @@ import (
 	"github.com/yoshiomiyamaegones/pkg/logger"
 )
 
-// ReadRegister reads from PPU register
+// ReadRegister reads from a PPU register. The per-case open-bus refresh
+// masks (5-7 for $2002, 0-5 for $2007 palette, full for $2004/$2007
+// non-palette, none for write-only registers) match the table in blargg's
+// ppu_open_bus readme; see refreshOpenBus/readOpenBus in ppu.go.
 func (p *PPU) ReadRegister(addr uint16) uint8 {
 	switch addr {
 	case 0x2002: // PPUSTATUS
-		value := p.PPUSTATUS
-		logger.LogPPU("Read PPUSTATUS: $%02X", value)
-		p.PPUSTATUS &^= PPUSTATUSVBlank // Clear VBlank flag
-		p.w = 0                         // Reset write toggle
-		return value
+		statusBits := p.PPUSTATUS & 0xE0
+		logger.LogPPU("Read PPUSTATUS: $%02X", statusBits)
+		p.refreshOpenBus(statusBits, 0xE0)
+		p.PPUSTATUS &^= PPUSTATUSVBlank
+		p.w = 0
+		return statusBits | (p.readOpenBus() & 0x1F)
 	case 0x2004: // OAMDATA
-		return p.OAM[p.OAMADDR]
+		value := p.OAM[p.OAMADDR]
+		// Sprite attribute byte: bits 2-4 are unimplemented and read as 0.
+		if p.OAMADDR&3 == 2 {
+			value &= 0xE3
+		}
+		p.refreshOpenBus(value, 0xFF)
+		return value
 	case 0x2007: // PPUDATA
 		var value uint8
+		// The PPU bus is 14-bit; bits 14-15 of v are ignored when deciding
+		// whether the access falls inside the palette region. Without this
+		// mask, an access at v=$4000 (after an increment from $3FFF) reads
+		// as palette and bypasses the buffered-read latch (blargg's
+		// test 57: "Setting PPU address to 3FFF & reading $2007 thrice
+		// should give the contents of $0000").
+		readAddr := p.v & 0x3FFF
+		palette := readAddr >= 0x3F00
 
-		if p.v >= 0x3F00 {
-			// Palette reads are immediate (no buffering)
-			value = p.readVRAM(p.v)
-			// Update buffer with underlying nametable data
-			p.readBuffer = p.readVRAM(p.v - 0x1000)
+		if palette {
+			value = p.readVRAM(readAddr) & 0x3F
+			// Buffer fills with the mirrored nametable byte at addr-$1000.
+			p.readBuffer = p.readVRAM(readAddr - 0x1000)
 		} else {
-			// Non-palette reads use buffered system
 			value = p.readBuffer
-			p.readBuffer = p.readVRAM(p.v)
+			p.readBuffer = p.readVRAM(readAddr)
 		}
 
-		// Debug: Log $2007 reads for CHR area
-		if p.v < 0x2000 && p.v <= 0x000F {
+		if p.v <= 0x000F {
 			logger.LogPPU("$2007 Read CHR: vramAddr=$%04X, value=$%02X, buffer=$%02X", p.v, value, p.readBuffer)
 		}
 
 		p.incrementVRAMAddress()
 		p.notifyCartridgeA12()
+
+		if palette {
+			// Palette only drives bits 0-5; bits 6-7 come from open bus.
+			p.refreshOpenBus(value, 0x3F)
+			return value | (p.readOpenBus() & 0xC0)
+		}
+		p.refreshOpenBus(value, 0xFF)
 		return value
 	}
-	return 0
+	// $2000, $2001, $2003, $2005, $2006 are write-only — reads return the
+	// current decay-register value without refreshing it.
+	return p.readOpenBus()
 }
 
 // WriteRegister writes to PPU register
 func (p *PPU) WriteRegister(addr uint16, value uint8) {
+	// Any write to a PPU register puts the value onto the CPU-side data
+	// bus, refreshing all 8 bits of the decay register (including for
+	// $2002, which has no normal write effect but still drives the bus).
+	p.refreshOpenBus(value, 0xFF)
 	switch addr {
 	case 0x2000: // PPUCTRL
 		oldValue := p.PPUCTRL
@@ -117,7 +145,7 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 	case 0x2007: // PPUDATA
 		logger.LogPPU("PPU Write $2007: vramAddr=$%04X, value=$%02X", p.v, value)
 		// Debug: Enhanced logging for CHR area writes
-		if p.v < 0x2000 && p.v <= 0x000F {
+		if p.v <= 0x000F {
 			logger.LogPPU("$2007 Write CHR: vramAddr=$%04X, value=$%02X", p.v, value)
 		}
 		p.writeVRAM(p.v, value)

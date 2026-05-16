@@ -102,14 +102,14 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 		cart.CHRRAM = make([]uint8, chrRAMSize)
 	}
 
-	// PRG RAM: 32KB for battery-backed carts (e.g. Final Fantasy II needs
-	// the larger size). MMC3 carts always expose 8KB at $6000-$7FFF even
-	// without a battery — blargg's mmc3_test writes its status string there
-	// and many MMC3 games use it as work RAM.
-	switch {
-	case cart.Header.Flags6&0x02 != 0:
+	// PRG RAM: 32KB for battery-backed carts (e.g. Final Fantasy II), 8KB
+	// otherwise. We always allocate the 8KB window even when the iNES
+	// header doesn't flag the cart as having RAM, because blargg's test
+	// ROMs write their status protocol to $6000+ regardless of mapper or
+	// battery flag, and many MMC3/MMC1 games use $6000-$7FFF as work RAM.
+	if cart.Header.Flags6&0x02 != 0 {
 		cart.PRGRAM = make([]uint8, 32768)
-	case mapperNumber == 4:
+	} else {
 		cart.PRGRAM = make([]uint8, 8192)
 	}
 

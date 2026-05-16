@@ -355,13 +355,49 @@ func (c *CPU) getOperand(mode AddressingMode) (uint8, bool) {
 	switch mode {
 	case AddrAccumulator:
 		return c.A, false
-		
+
 	case AddrImmediate:
 		addr, _ := c.getOperandAddress(mode)
 		return c.read(addr), false
-		
+
 	default:
 		addr, pageCrossed := c.getOperandAddress(mode)
 		return c.read(addr), pageCrossed
 	}
+}
+
+// getWriteAddress resolves the target address for a store instruction,
+// emitting the dummy read at the uncorrected target that the real 6502
+// always issues on indexed addressing modes (abs,X / abs,Y / (zp),Y), even
+// when no page boundary is crossed. blargg's test_ppu_read_buffer subtest
+// 35 ("STA $2000,Y with Y=7 must trigger a $2007 dummy read") relies on
+// this; getOperandAddress only emits the dummy read on actual page crosses
+// (the read-instruction case).
+func (c *CPU) getWriteAddress(mode AddressingMode) uint16 {
+	switch mode {
+	case AddrAbsoluteX:
+		base := c.read16(c.PC)
+		c.PC += 2
+		return c.indexedWriteAddr(base, c.X)
+	case AddrAbsoluteY:
+		base := c.read16(c.PC)
+		c.PC += 2
+		return c.indexedWriteAddr(base, c.Y)
+	case AddrIndirectIndexed: // (zp),Y
+		base := c.read(c.PC)
+		c.PC++
+		lo := c.read(uint16(base))
+		hi := c.read((uint16(base) + 1) & 0xFF)
+		return c.indexedWriteAddr(uint16(hi)<<8|uint16(lo), c.Y)
+	}
+	addr, _ := c.getOperandAddress(mode)
+	return addr
+}
+
+// indexedWriteAddr emits the uncorrected-address dummy read shared by every
+// indexed-store mode and returns the corrected target.
+func (c *CPU) indexedWriteAddr(base uint16, idx uint8) uint16 {
+	addr := base + uint16(idx)
+	c.read((base & 0xFF00) | (addr & 0xFF))
+	return addr
 }

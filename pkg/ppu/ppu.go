@@ -68,6 +68,13 @@ type PPU struct {
 	// Set on PPUMASK render-off→on; cleared after one $1000-mode tick.
 	mmc3FirstClockPending bool
 
+	// openBus models the PPU's CPU-side data-bus "decay register". Per-bit
+	// refresh because $2002 reads only refresh bits 5-7 (test 7 verifies
+	// bits 0-4 still decay independently) and $2007 palette reads only
+	// refresh bits 0-5 (test 9 verifies bits 6-7 still decay).
+	openBusValue      uint8
+	openBusDecayFrame [8]uint64
+
 	// cachedMirroring snapshots Cartridge.GetMirroring() at scanline start.
 	// mirrorNameTableAddress reads this every nametable access — looking it
 	// up via the cartridge interface every time was a measurable cost. MMC1
@@ -496,6 +503,43 @@ func (p *PPU) ClearMapperIRQ() {
 // AND/compare — inlined by the compiler.
 func (p *PPU) renderingEnabled() bool {
 	return p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow) != 0
+}
+
+// openBusDecayFrames is the window after which an un-refreshed bit reads
+// as 0. Spec says ~600ms; 30 frames sits comfortably between blargg's
+// rapid-poll tests (must NOT have decayed at <1000ms with no refresh) and
+// the slow-decay test (must have decayed by 1000ms).
+const openBusDecayFrames = 30
+
+// refreshOpenBus updates bits in `mask` to take their values from `value`
+// and resets their decay timers to the current frame. Hot path — the
+// mask=0xFF case (every WriteRegister, $2004 read, $2007 non-palette read)
+// gets a vectorisable array assignment instead of an 8-iter masked loop.
+func (p *PPU) refreshOpenBus(value, mask uint8) {
+	p.openBusValue = (p.openBusValue &^ mask) | (value & mask)
+	f := p.Frame
+	if mask == 0xFF {
+		p.openBusDecayFrame = [8]uint64{f, f, f, f, f, f, f, f}
+		return
+	}
+	for i := uint8(0); i < 8; i++ {
+		if mask&(1<<i) != 0 {
+			p.openBusDecayFrame[i] = f
+		}
+	}
+}
+
+// readOpenBus returns the decay-register value with each bit zeroed if it
+// hasn't been refreshed within the decay window.
+func (p *PPU) readOpenBus() uint8 {
+	var result uint8
+	f := p.Frame
+	for i := uint8(0); i < 8; i++ {
+		if f-p.openBusDecayFrame[i] < openBusDecayFrames {
+			result |= p.openBusValue & (1 << i)
+		}
+	}
+	return result
 }
 
 // handleFrameCompletion manages persistent frame buffer and rendering state
