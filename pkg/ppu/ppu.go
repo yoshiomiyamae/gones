@@ -107,14 +107,17 @@ type PPU struct {
 	// enough for every commercial game.
 	cachedMirroring int
 
-	// scanlineTiles is the 33-tile pre-fetch for the current visible
-	// scanline. Filled at Cycle 0 after the horizontal scroll restore;
-	// renderBackgroundPixelCached reads it as a simple array lookup
-	// instead of refetching identical nametable/pattern bytes ~8 times
-	// per tile. v.coarseX/fineX are fixed for the duration of a scanline
-	// in this PPU model (no per-cycle coarseX increments), so a single
-	// prefetch covers all 256 visible pixels.
-	scanlineTiles [33]BackgroundTile
+	// currentBGTile holds the most-recently-fetched background tile for
+	// the visible scanline; currentBGTileX is its index (-1 = invalid).
+	// renderBackgroundPixel re-fetches when crossing an 8-pixel tile
+	// boundary, so a mid-scanline $2000 D4 toggle (pattern table) or a
+	// $2005/$2006 update affects subsequent tiles within the same
+	// scanline — required by Quietust's scanline test. v.coarseX / fineX
+	// are still constant for the scanline in this PPU model, so the
+	// cache invalidates only on tileX change (≈33 fetches per scanline,
+	// same volume as the old whole-scanline prefetch).
+	currentBGTile  BackgroundTile
+	currentBGTileX int
 
 	// Rendering
 	PaletteManager *PaletteManager
@@ -189,6 +192,7 @@ func New(mem *memory.Memory) *PPU {
 		Cycle:          0,
 		Scanline:       0,
 		PaletteManager: NewPaletteManager(),
+		currentBGTileX: -1,
 	}
 }
 
@@ -205,6 +209,7 @@ func (p *PPU) Reset() {
 	p.Cycle = 0
 	p.Scanline = 0
 	p.FrameComplete = false
+	p.currentBGTileX = -1
 
 	// Initialize persistent buffer with background color to indicate "no content yet"
 	// Don't reset persistent buffer on Reset to preserve accumulated content
@@ -346,16 +351,13 @@ func (p *PPU) Step() {
 		}
 	}
 
-	// Handle visible scanlines
-	if p.Scanline >= 0 && p.Scanline < 240 {
-		// Copy horizontal scroll components from t to v at start of next scanline
-		if p.Cycle == 0 && p.renderingEnabled() {
-			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
-			p.x = p.xTemp // Apply fine X scroll from temporary register
-			if p.PPUMASK&PPUMASKBGShow != 0 {
-				p.prefetchScanlineTiles()
-			}
-		}
+	// Copy horizontal scroll from t to v at the start of each visible
+	// scanline and invalidate the single-tile cache so the first fetch
+	// uses the just-restored v / x.
+	if p.Scanline >= 0 && p.Scanline < 240 && p.Cycle == 0 && p.renderingEnabled() {
+		p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
+		p.x = p.xTemp
+		p.currentBGTileX = -1
 	}
 }
 
@@ -713,11 +715,9 @@ func (p *PPU) LoadState(r io.Reader) error {
 
 // invalidateRenderCache drops any tile/sprite data cached by the renderer
 // for the current scanline. Call after restoring VRAM/OAM so the next
-// pixel fetch re-reads from the freshly loaded state instead of stale
-// cached patterns. The scanline tile prefetch will refill on the next
-// visible scanline's Cycle 0.
+// pixel fetch re-reads from the freshly loaded state.
 func (p *PPU) invalidateRenderCache() {
-	p.scanlineTiles = [33]BackgroundTile{}
+	p.currentBGTileX = -1
 	p.currentSprites = nil
 }
 

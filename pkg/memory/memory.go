@@ -139,9 +139,16 @@ func (m *Memory) read(addr uint16) uint8 {
 	return 0
 }
 
-// Write writes a byte to the given address
-func (m *Memory) Write(addr uint16, value uint8) {
+// oamDMAStallCycles is the cost an OAM DMA adds to the CPU on top of the
+// 4-cycle STA $4014: 1 dummy/alignment + 256 reads + 256 writes. Returned
+// from Write so the CPU can charge the stall without knowing about $4014.
+const oamDMAStallCycles = 513
 
+// Write writes a byte to the given address. Returns the number of extra
+// CPU stall cycles the access cost beyond the instruction's normal cycle
+// count — non-zero only for OAM DMA at $4014. Other callers may safely
+// ignore the return.
+func (m *Memory) Write(addr uint16, value uint8) int {
 	switch {
 	case addr < 0x2000:
 		// CPU RAM (0x0000-0x1FFF, mirrored every 0x800 bytes)
@@ -151,7 +158,6 @@ func (m *Memory) Write(addr uint16, value uint8) {
 		// PPU registers (0x2000-0x3FFF, mirrored every 8 bytes)
 		if m.PPU != nil {
 			ppuAddr := 0x2000 + (addr & 0x7)
-			// Debug: Log $2006/$2007 writes specifically
 			if ppuAddr == 0x2006 || ppuAddr == 0x2007 {
 				logger.LogCPU("Memory Write PPU $%04X: value=$%02X", ppuAddr, value)
 			}
@@ -159,37 +165,30 @@ func (m *Memory) Write(addr uint16, value uint8) {
 		}
 
 	case addr == 0x4014:
-		// OAM DMA
 		m.performOAMDMA(value)
+		return oamDMAStallCycles
 
 	case addr == 0x4016:
-		// Controller 1
 		if m.Input != nil {
 			m.Input.Write(value)
 		}
 
 	case addr < 0x4020:
-		// APU and I/O registers (0x4000-0x401F)
 		if m.APU != nil {
 			m.APU.WriteRegister(addr, value)
 		}
 	case addr >= 0x6000:
-		// Cartridge PRG ROM space (0x8000-0xFFFF)
 		if m.Cartridge != nil {
 			m.Cartridge.WritePRG(addr, value)
 		} else {
-			// For testing: use HighMem when no cartridge is present
 			index := addr - 0x6000
 			if index >= 0xA000 {
-				// Index out of bounds - this shouldn't happen
-				return
+				return 0
 			}
 			m.HighMem[index] = value
 		}
-
-	default:
-		// Unmapped addr > 0x4020 && addr < 0x6000
 	}
+	return 0
 }
 
 // SaveState writes the CPU work RAM contents (2KB) to w.

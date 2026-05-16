@@ -1,9 +1,5 @@
 package ppu
 
-import (
-	"github.com/yoshiomiyamaegones/pkg/logger"
-)
-
 // TileData represents an 8x8 pixel tile
 type TileData struct {
 	LowByte  uint8 // Low bit plane
@@ -83,25 +79,11 @@ func (p *PPU) fetchBackgroundTileWithScroll(tileX int) BackgroundTile {
 
 	// v.fineY is the pixel row within the current tile for this scanline.
 	fineY := (p.v >> 12) & 0x07
-	patternLoAddr := tileAddr + fineY
-	patternHiAddr := tileAddr + fineY + 8
-
-	// Debug removed for performance
-
-	patternLo := p.readVRAM(patternLoAddr)
-	patternHi := p.readVRAM(patternHiAddr)
-
-	// Debug: Log pattern reads for character rendering issues
-	if tileIndex >= 0x10 && tileIndex <= 0x7F && (patternLo != 0 || patternHi != 0) {
-		logger.LogPPU("BG Tile: idx=$%02X, addr=$%04X, patternLo=$%02X, patternHi=$%02X, table=$%04X",
-			tileIndex, tileAddr, patternLo, patternHi, patternTableBase)
-	}
-
 	return BackgroundTile{
 		TileIndex:  tileIndex,
 		Attributes: attributes,
-		PatternLo:  patternLo,
-		PatternHi:  patternHi,
+		PatternLo:  p.readVRAM(tileAddr + fineY),
+		PatternHi:  p.readVRAM(tileAddr + fineY + 8),
 	}
 }
 
@@ -118,9 +100,8 @@ func getPixelColor(patternLo, patternHi uint8, pixelX int) uint8 {
 	return colorIndex
 }
 
-// isBackgroundPixelOpaque checks if background pixel is opaque (non-zero
-// color index). Reads from the pre-fetched scanline tile array — sprite 0
-// hit detection always runs after prefetchScanlineTiles has filled it.
+// isBackgroundPixelOpaque checks whether the background pixel at (x,y) is
+// non-transparent. Shares the single-tile cache with renderBackgroundPixel.
 func (p *PPU) isBackgroundPixelOpaque(x, y int) bool {
 	_ = y
 	if p.PPUMASK&PPUMASKBGShow == 0 {
@@ -129,31 +110,27 @@ func (p *PPU) isBackgroundPixelOpaque(x, y int) bool {
 	if x < 8 && p.PPUMASK&PPUMASKBGLeft == 0 {
 		return false
 	}
-
-	fineX := int(p.x)
-	adjustedX := x + fineX
-	tileX := adjustedX / 8
-	pixelX := adjustedX & 7
-
-	tile := &p.scanlineTiles[tileX]
-	return getPixelColor(tile.PatternLo, tile.PatternHi, pixelX) != 0
+	adjustedX := x + int(p.x)
+	tile := p.bgTileAt(adjustedX / 8)
+	return getPixelColor(tile.PatternLo, tile.PatternHi, adjustedX&7) != 0
 }
 
-// prefetchScanlineTiles fills p.scanlineTiles with the 33 background
-// tiles covering the visible 256 pixels plus a margin for fineX scroll.
-// Called at Cycle 0 of each visible scanline after horizontal scroll
-// restore; subsequent renderBackgroundPixelCached calls become O(1).
-func (p *PPU) prefetchScanlineTiles() {
-	for tileX := 0; tileX < 33; tileX++ {
-		p.scanlineTiles[tileX] = p.fetchBackgroundTileWithScroll(tileX)
+// bgTileAt returns the background tile for screen-tile-column tileX,
+// refetching whenever tileX changes since the last call (and at scanline
+// start via the currentBGTileX = -1 reset). The fetch uses the live
+// PPUCTRL.BGTable / v / x state, so a $2000 / $2005 / $2006 write inside
+// a scanline propagates to subsequent tiles — see PPU.currentBGTile.
+func (p *PPU) bgTileAt(tileX int) BackgroundTile {
+	if tileX != p.currentBGTileX {
+		p.currentBGTile = p.fetchBackgroundTileWithScroll(tileX)
+		p.currentBGTileX = tileX
 	}
+	return p.currentBGTile
 }
 
-// renderBackgroundPixelCached renders a single background pixel using
-// the pre-fetched scanline tile array. v.coarseX/fineX are fixed for
-// the scanline (no per-cycle coarseX advance in this PPU model), so a
-// single prefetch covers all 256 pixels.
-func (p *PPU) renderBackgroundPixelCached(x, y int) uint32 {
+// renderBackgroundPixel renders one background pixel using the current
+// (possibly just-updated) PPU state.
+func (p *PPU) renderBackgroundPixel(x, y int) uint32 {
 	_ = y
 	if p.PPUMASK&PPUMASKBGShow == 0 {
 		return p.PaletteManager.GetBackgroundColor(0, 0)
@@ -161,46 +138,10 @@ func (p *PPU) renderBackgroundPixelCached(x, y int) uint32 {
 	if x < 8 && p.PPUMASK&PPUMASKBGLeft == 0 {
 		return p.PaletteManager.GetBackgroundColor(0, 0)
 	}
-
-	fineX := int(p.x)
-	adjustedX := x + fineX
-	tileX := adjustedX / 8
-	pixelX := adjustedX & 7
-
-	tile := &p.scanlineTiles[tileX]
-	colorIndex := getPixelColor(tile.PatternLo, tile.PatternHi, pixelX)
+	adjustedX := x + int(p.x)
+	tile := p.bgTileAt(adjustedX / 8)
+	colorIndex := getPixelColor(tile.PatternLo, tile.PatternHi, adjustedX&7)
 	return p.PaletteManager.GetBackgroundColor(tile.Attributes, colorIndex)
-}
-
-// renderBackgroundPixel renders a single background pixel
-func (p *PPU) renderBackgroundPixel(x, y int) uint32 {
-	// Check if background rendering is enabled
-	if p.PPUMASK&PPUMASKBGShow == 0 {
-		return p.PaletteManager.GetBackgroundColor(0, 0) // Universal backdrop
-	}
-
-	// Check if we should hide background in leftmost 8 pixels
-	if x < 8 && p.PPUMASK&PPUMASKBGLeft == 0 {
-		return p.PaletteManager.GetBackgroundColor(0, 0) // Universal backdrop
-	}
-
-	// Apply fine X scroll for smooth scrolling
-	fineX := int(p.x)
-	adjustedX := x + fineX
-
-	_ = y // Y comes from v register (advanced per scanline by incrementY).
-	tileX := adjustedX / 8
-	pixelX := adjustedX % 8
-
-	tile := p.fetchBackgroundTileWithScroll(tileX)
-
-	// Get pixel color from pattern data
-	colorIndex := getPixelColor(tile.PatternLo, tile.PatternHi, pixelX)
-
-	// Get final color from palette
-	color := p.PaletteManager.GetBackgroundColor(tile.Attributes, colorIndex)
-
-	return color
 }
 
 // fetchSpriteData fetches data for all sprites on current scanline
@@ -348,8 +289,9 @@ func (p *PPU) renderPixel() {
 		return
 	}
 
-	// Render background pixel with caching
-	bgColor := p.renderBackgroundPixelCached(x, y)
+	// Render background pixel — fetches the tile lazily so mid-scanline
+	// $2000/$2005/$2006 writes propagate to subsequent tiles.
+	bgColor := p.renderBackgroundPixel(x, y)
 
 	// Fetch sprites for this scanline (cache for efficiency)
 	if p.Cycle == 0 {

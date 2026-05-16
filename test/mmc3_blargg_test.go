@@ -15,12 +15,13 @@ import (
 // These tests write their status to $6000 (a-la blargg test runner protocol).
 const blarggMMC3TestDir = `R:\nes-test-roms-master\mmc3_test`
 
-// runBlarggTest runs a blargg-style test ROM (status at $6000, ASCII text at
-// $6004+). Returns the final status byte, the printed text, and the number of
-// frames executed.
-func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, text string, frames int) {
+// loadNES loads the iNES ROM at romPath, builds a fresh NES system around
+// it, and resets the CPU. Shared by every test that wants to run a ROM
+// from disk without bringing in the GUI; the blargg-style status-polling
+// loop lives in runBlarggTest, but tests that read raw framebuffer state
+// (e.g. scanline_test) use loadNES directly.
+func loadNES(t *testing.T, romPath string) *nes.NES {
 	t.Helper()
-
 	data, err := os.ReadFile(romPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", romPath, err)
@@ -29,10 +30,18 @@ func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, t
 	if err != nil {
 		t.Fatalf("load cartridge %s: %v", romPath, err)
 	}
+	sys := nes.NewNES()
+	sys.LoadCartridge(cart)
+	sys.Reset()
+	return sys
+}
 
-	system := nes.NewNES()
-	system.LoadCartridge(cart)
-	system.Reset()
+// runBlarggTest runs a blargg-style test ROM (status at $6000, ASCII text at
+// $6004+). Returns the final status byte, the printed text, and the number of
+// frames executed.
+func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, text string, frames int) {
+	t.Helper()
+	system := loadNES(t, romPath)
 
 	const (
 		statusAddr = 0x6000

@@ -36,6 +36,13 @@ type CPU struct {
 	// this — the IRQ has to land after the `nop;nop;inc irq_flag` trio that
 	// follows CLI, not immediately on the first NOP.
 	irqInhibitOneInstruction bool
+
+	// extraCycles is added to the next CPU.Step's returned cycle count.
+	// Currently used for OAM DMA (STA $4014 halts the CPU for 513 extra
+	// cycles while the DMA controller copies 256 bytes into OAM); the
+	// Quietust scanline test calibrates NMI-handler scanline positions
+	// against the full ~517 cycle cost.
+	extraCycles int
 }
 
 // Status flag bits
@@ -90,6 +97,10 @@ func (c *CPU) Step() int {
 
 	// Execute instruction
 	cycles := c.executeInstruction(opcode)
+	// Add any extra cycles charged by side effects (e.g. OAM DMA on a
+	// $4014 write, which stalls the CPU for 513 cycles).
+	cycles += c.extraCycles
+	c.extraCycles = 0
 	c.Cycles += cycles
 
 	return cycles
@@ -117,7 +128,7 @@ func (c *CPU) read(addr uint16) uint8 {
 }
 
 func (c *CPU) write(addr uint16, value uint8) {
-	c.Memory.Write(addr, value)
+	c.extraCycles += c.Memory.Write(addr, value)
 }
 
 func (c *CPU) read16(addr uint16) uint16 {
