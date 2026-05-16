@@ -29,7 +29,12 @@ type NES struct {
 	Cycles uint64
 	Frame  uint64
 
-	// pendingNMI is the 1-step deferred NMI flag — see Step() for the why.
+	// nmiDelay → pendingNMI → c.NMI is the two-step NMI deferral pipeline.
+	// Each Step() advances one stage; nmiDelay is set when the PPU asserts
+	// NMIRequested (either inside CPU.Step from an immediate $2000-write
+	// path or during PPU catch-up from VBL set). See Step() for why two
+	// stages are required to hit the right CPU instruction boundary.
+	nmiDelay   bool
 	pendingNMI bool
 }
 
@@ -72,40 +77,45 @@ func (n *NES) Reset() {
 
 // Step executes one CPU cycle
 func (n *NES) Step() {
-	// Run the CPU instruction first. If a previous PPU catch-up set
-	// pendingNMI, we hold off triggering it until AFTER this instruction —
-	// this lets a polling LDA $2002 see the vblank flag that fired during
-	// the previous step's catch-up, matching real-hardware behavior where
-	// vblank flips during the polling instruction's read cycle and NMI is
-	// sampled at end-of-instruction. Without this, Dragon Quest III hangs
-	// in its vblank-wait loop because the NMI handler steals the flag.
 	cpuCycles := n.CPU.Step()
 
-	// The CPU instruction may have written $E000 (MMC3 IRQ ack) which
-	// drops the mapper's pending bit. Refresh the PPU's cached mirror so
-	// the level-triggered c.IRQ sync below sees the new state — without
-	// this, blargg's mmc3_test get_pending CLI fires a phantom IRQ.
+	// Capture an immediate NMI assertion (set inside CPU.Step by a $2000
+	// write enabling NMI while VBL is set) — see the pipeline comment
+	// below for why it gets a different deferral than a catch-up-side
+	// assertion.
+	immediateNMI := n.PPU.ConsumeNMI()
+
+	// The CPU instruction may have written $E000 (MMC3 IRQ ack); refresh
+	// the cached mirror so the level-triggered c.IRQ sync below sees it.
 	if n.Cartridge != nil {
 		n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
 	}
 
+	// NMI delivery pipeline — each stage advances one nes.Step:
+	//   Immediate ($2000 write inside CPU.Step): immediateNMI →
+	//     pendingNMI → c.NMI. 2-step (nmi_control test 11).
+	//   Regular (VBL set in catch-up): NMIRequested → nmiDelay →
+	//     pendingNMI → c.NMI. 3-step (nmi_timing).
 	if n.pendingNMI {
 		n.CPU.TriggerNMI()
 		n.pendingNMI = false
+	}
+	if n.nmiDelay {
+		n.pendingNMI = true
+		n.nmiDelay = false
+	}
+	if immediateNMI {
+		n.pendingNMI = true
 	}
 
 	for i := 0; i < cpuCycles*3; i++ {
 		n.PPU.Step()
 
-		if n.PPU.NMIRequested {
-			n.pendingNMI = true
-			n.PPU.NMIRequested = false
+		if n.PPU.ConsumeNMI() {
+			n.nmiDelay = true
 		}
 
-		// Level-triggered IRQ: track the mapper line every cycle so a
-		// mid-instruction mapper-pending rise from the PPU side is
-		// visible at the next instruction boundary, and an $E000 ack
-		// drops the line immediately rather than firing spuriously.
+		// Level-triggered IRQ tracking.
 		n.CPU.IRQ = n.PPU.MapperIRQ
 	}
 
@@ -173,7 +183,7 @@ func CompanionFile(romPath, suffix string) string {
 // layout of any component changes — older files are then rejected at load.
 const (
 	stateMagic   uint32 = 0x47_4E_53_54 // "GNST"
-	StateVersion uint32 = 3              // v3: + NES.pendingNMI byte after cartridge section
+	StateVersion uint32 = 4              // v4: + NES.nmiDelay; + PPU vblSuppressed/nmiAssertCountdown/oddFrame
 )
 
 // SaveState writes a complete emulator snapshot (CPU + PPU + APU + memory +
@@ -203,14 +213,17 @@ func (n *NES) SaveState(w io.Writer) error {
 			return fmt.Errorf("cartridge: %w", err)
 		}
 	}
-	// pendingNMI: deferred-by-1-instruction NMI flag (see Step). Must be
-	// preserved so a state saved between vblank and NMI handler doesn't lose
-	// the pending interrupt.
-	var pending uint8
+	// nmiDelay / pendingNMI: the two-stage NMI deferral pipeline (see
+	// Step). Both must be preserved so a state saved mid-pipeline doesn't
+	// lose the pending interrupt.
+	var flags uint8
 	if n.pendingNMI {
-		pending = 1
+		flags |= 1
 	}
-	return binary.Write(w, binary.LittleEndian, pending)
+	if n.nmiDelay {
+		flags |= 2
+	}
+	return binary.Write(w, binary.LittleEndian, flags)
 }
 
 // LoadState restores a snapshot written by SaveState. The cartridge must
@@ -247,10 +260,11 @@ func (n *NES) LoadState(r io.Reader) error {
 			return fmt.Errorf("cartridge: %w", err)
 		}
 	}
-	var pending uint8
-	if err := binary.Read(r, binary.LittleEndian, &pending); err != nil {
-		return fmt.Errorf("pendingNMI: %w", err)
+	var flags uint8
+	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
+		return fmt.Errorf("NMI pipeline flags: %w", err)
 	}
-	n.pendingNMI = pending != 0
+	n.pendingNMI = flags&1 != 0
+	n.nmiDelay = flags&2 != 0
 	return nil
 }

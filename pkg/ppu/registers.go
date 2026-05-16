@@ -19,6 +19,13 @@ import (
 func (p *PPU) ReadRegister(addr uint16) uint8 {
 	switch addr {
 	case 0x2002: // PPUSTATUS
+		// VBL race: a $2002 read on the cycle just before our VBL-flag set
+		// transition (which lands at the (240, 340) → (241, 0) wrap in our
+		// model — see PPU.vblSuppressed) suppresses the flag set and NMI
+		// for this frame, matching real-hardware behaviour.
+		if p.Scanline == 240 && p.Cycle == 340 {
+			p.vblSuppressed = true
+		}
 		statusBits := p.PPUSTATUS & 0xE0
 		logger.LogPPU("Read PPUSTATUS: $%02X", statusBits)
 		p.refreshOpenBus(statusBits, 0xE0)
@@ -88,6 +95,14 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 			oldValue, value, (value&PPUCTRLNMIEnable) != 0,
 			uint16(0x1000)*uint16((value&PPUCTRLBGTable)>>4),
 			uint16(0x1000)*uint16((value&PPUCTRLSpriteTable)>>3))
+		// Immediate NMI: enabling NMI (bit 7 transition 0→1) while VBL is
+		// set fires an NMI right away; pendingNMI defers one instruction
+		// per nmi_control test 11 "after NEXT instruction". Re-writing $80
+		// when NMI is already enabled (1→1) does NOT re-fire.
+		if oldValue&PPUCTRLNMIEnable == 0 && value&PPUCTRLNMIEnable != 0 &&
+			p.PPUSTATUS&PPUSTATUSVBlank != 0 {
+			p.NMIRequested = true
+		}
 	case 0x2001: // PPUMASK
 		oldValue := p.PPUMASK
 		logger.LogPPU("Write PPUMASK: $%02X -> $%02X (BGShow=%v, SpriteShow=%v, Greyscale=%v)",

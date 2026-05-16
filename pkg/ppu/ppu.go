@@ -68,6 +68,30 @@ type PPU struct {
 	// Set on PPUMASK render-off→on; cleared after one $1000-mode tick.
 	mmc3FirstClockPending bool
 
+	// vblSuppressed records a $2002 read that landed in the race window
+	// where the VBL flag is about to be set. On real hardware a read
+	// straddling the set cycle suppresses both the flag set and the NMI
+	// for that frame. Our PPU lags the real PPU by ~2 cycles at memory-
+	// access time (the read happens before the post-instruction catch-up),
+	// so the race window in our model lands at (scanline 240, cycle 340)
+	// — the last cycle before our (241, 0) flag-set transition. Set by
+	// ReadRegister, consumed by Step at the transition.
+	vblSuppressed bool
+
+	// nmiAssertCountdown defers the NMI-line assertion by
+	// nmiAssertDelayPPUCycles cycles after the VBL flag is set. The flag
+	// itself becomes visible to a CPU $2002 read immediately (so blargg
+	// vbl_set_time test 5+ passes); the NMI assertion lags so nmi_timing's
+	// transitions land at the right calibration row. 0 = inactive;
+	// counts down per Step, asserts NMIRequested on hitting 0.
+	nmiAssertCountdown uint8
+
+	// oddFrame flips at the end of every pre-render scanline. NTSC PPU
+	// "skips" one cycle (cycle 340 of pre-render) on odd frames when BG
+	// rendering is enabled — blargg even_odd_frames / even_odd_timing
+	// rely on this to keep their hit-counter calibration in sync.
+	oddFrame bool
+
 	// openBus models the PPU's CPU-side data-bus "decay register". Per-bit
 	// refresh because $2002 reads only refresh bits 5-7 (test 7 verifies
 	// bits 0-4 still decay independently) and $2007 palette reads only
@@ -203,6 +227,19 @@ func (p *PPU) SetCartridge(cart interface {
 
 // Step executes one PPU cycle
 func (p *PPU) Step() {
+	// NMI-assertion countdown — see PPU.nmiAssertCountdown. Tick down
+	// here so the assertion lands N PPU cycles after the VBL set Step.
+	// Re-check VBL at expiry: if a CPU $2002 read cleared the flag during
+	// the countdown window, NMI is suppressed (blargg suppression test
+	// rows 05-06: flag read back as set but NMI never fires because the
+	// quickly-cleared flag never held the NMI line low long enough).
+	if p.nmiAssertCountdown > 0 {
+		p.nmiAssertCountdown--
+		if p.nmiAssertCountdown == 0 && p.PPUCTRL&PPUCTRLNMIEnable != 0 && p.PPUSTATUS&PPUSTATUSVBlank != 0 {
+			p.NMIRequested = true
+		}
+	}
+
 	// Update emphasis for palette manager
 	p.PaletteManager.SetEmphasis(p.PPUMASK & 0xE0)
 
@@ -254,35 +291,45 @@ func (p *PPU) Step() {
 		p.refreshMirroringCache()
 
 		p.Scanline++
+		// Odd-frame skip: NTSC PPU drops the first idle tick (cycle 0) of
+		// scanline 0 on odd frames when background rendering is enabled.
+		// Realised here by starting the new visible scanline at cycle 1
+		// instead of 0 under those conditions.
+		if p.Scanline == 0 && p.oddFrame && p.PPUMASK&PPUMASKBGShow != 0 {
+			p.Cycle = 1
+		}
 
 		if p.Scanline == 241 {
-			// VBlank start: set VBlank flag and request NMI if enabled.
-			// NOTE: sprite 0 hit and sprite overflow flags are NOT cleared
-			// here; per the NESdev wiki PPU rendering page they are cleared
-			// only on the pre-render scanline (-1) at cycle 1. Clearing
-			// them at VBlank start truncates the window where games can
-			// poll sprite 0 hit (e.g. SMB3 stage HUD split).
-			p.PPUSTATUS |= PPUSTATUSVBlank
-			if p.PPUCTRL&PPUCTRLNMIEnable != 0 {
-				p.NMIRequested = true
+			// VBlank start: set VBlank flag immediately so a CPU $2002
+			// read here observes it (vbl_set_time T+5). The NMI assertion
+			// is deferred by nmiAssertDelayPPUCycles so nmi_timing's
+			// calibration table lands on the right CPU instruction.
+			if !p.vblSuppressed {
+				p.PPUSTATUS |= PPUSTATUSVBlank
+				if p.PPUCTRL&PPUCTRLNMIEnable != 0 {
+					p.nmiAssertCountdown = nmiAssertDelayPPUCycles
+				}
 			}
+			p.vblSuppressed = false
 		}
 
 		if p.Scanline >= 261 {
 			p.Scanline = -1 // Pre-render scanline
 
 			// Pre-render line: clear VBlank, sprite 0 hit, and sprite overflow
-			// flags (per NESdev: cleared at cycle 1 of the pre-render line).
+			// flags. NESdev says this is at cycle 1 of pre-render; doing it
+			// here at the (260, 340) → (-1, 0) wrap places it one PPU cycle
+			// earlier in absolute terms. Tests vbl_clear_time / suppression
+			// pass with this earlier timing — moving the clear to (-1, 1)
+			// breaks test 3's row-06 expectation.
 			p.PPUSTATUS &^= PPUSTATUSVBlank
 			p.PPUSTATUS &^= PPUSTATUSSprite0Hit
 			p.PPUSTATUS &^= 0x20 // sprite overflow
 
 			p.FrameComplete = true
-
-			// Handle frame completion and persistent buffer management
 			p.handleFrameCompletion()
-
 			p.Frame++
+			p.oddFrame = !p.oddFrame
 		}
 	}
 
@@ -505,11 +552,28 @@ func (p *PPU) renderingEnabled() bool {
 	return p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow) != 0
 }
 
+// ConsumeNMI returns and clears the PPU's pending NMI assertion flag.
+// nes.Step uses this to route NMIs through its delivery pipeline without
+// touching the field directly.
+func (p *PPU) ConsumeNMI() bool {
+	if !p.NMIRequested {
+		return false
+	}
+	p.NMIRequested = false
+	return true
+}
+
 // openBusDecayFrames is the window after which an un-refreshed bit reads
 // as 0. Spec says ~600ms; 30 frames sits comfortably between blargg's
 // rapid-poll tests (must NOT have decayed at <1000ms with no refresh) and
 // the slow-decay test (must have decayed by 1000ms).
 const openBusDecayFrames = 30
+
+// nmiAssertDelayPPUCycles is the PPU-cycle gap between the VBL flag set
+// and the NMI-line assertion that drives NMIRequested. Tuned against
+// blargg nmi_timing's calibration table — anything other than 2 shifts
+// the transition rows by 1 each cycle of change.
+const nmiAssertDelayPPUCycles = 2
 
 // refreshOpenBus updates bits in `mask` to take their values from `value`
 // and resets their decay timers to the current frame. Hot path — the
@@ -584,6 +648,9 @@ type ppuState struct {
 	Scanline                                      int32
 	Frame                                         uint64
 	NMIRequested                                  bool
+	VblSuppressed                                 bool
+	NmiAssertCountdown                            uint8
+	OddFrame                                      bool
 	VRAM                                          [0x4000]uint8
 	OAM                                           [256]uint8
 	PaletteRAM                                    [32]uint8
@@ -597,14 +664,17 @@ func (p *PPU) SaveState(w io.Writer) error {
 		OAMADDR: p.OAMADDR, OAMDATA: p.OAMDATA,
 		PPUSCROLL: p.PPUSCROLL, PPUADDR: p.PPUADDR, PPUDATA: p.PPUDATA,
 		V: p.v, T: p.t, X: p.x, XTemp: p.xTemp, W: p.w,
-		ScrollY:      p.ScrollY,
-		ReadBuffer:   p.readBuffer,
-		Cycle:        int32(p.Cycle),
-		Scanline:     int32(p.Scanline),
-		Frame:        p.Frame,
-		NMIRequested: p.NMIRequested,
-		VRAM:         p.VRAM,
-		OAM:          p.OAM,
+		ScrollY:            p.ScrollY,
+		ReadBuffer:         p.readBuffer,
+		Cycle:              int32(p.Cycle),
+		Scanline:           int32(p.Scanline),
+		Frame:              p.Frame,
+		NMIRequested:       p.NMIRequested,
+		VblSuppressed:      p.vblSuppressed,
+		NmiAssertCountdown: p.nmiAssertCountdown,
+		OddFrame:           p.oddFrame,
+		VRAM:               p.VRAM,
+		OAM:                p.OAM,
 	}
 	if p.PaletteManager != nil {
 		s.PaletteRAM = p.PaletteManager.PaletteRAM
@@ -628,6 +698,9 @@ func (p *PPU) LoadState(r io.Reader) error {
 	p.Cycle, p.Scanline = int(s.Cycle), int(s.Scanline)
 	p.Frame = s.Frame
 	p.NMIRequested = s.NMIRequested
+	p.vblSuppressed = s.VblSuppressed
+	p.nmiAssertCountdown = s.NmiAssertCountdown
+	p.oddFrame = s.OddFrame
 	p.VRAM = s.VRAM
 	p.OAM = s.OAM
 	if p.PaletteManager != nil {

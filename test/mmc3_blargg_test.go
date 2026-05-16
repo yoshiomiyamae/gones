@@ -85,44 +85,35 @@ func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, t
 	return status, text, frames
 }
 
-// TestMMC3BlarggSuite runs each of the 6 MMC3 test ROMs. A ROM passes when
-// the status byte at $6000 reaches 0 and the printed text contains "passed".
-//
-// Notes on coverage:
-//   - 1-clocking, 2-details, 3-A12_clocking, 4-scanline_timing, 5-MMC3:
-//     core MMC3 IRQ counter, A12 rising-edge clocking, and cycle-accurate
-//     raster IRQ timing — all pass.
-//   - 6-MMC6: tests a MMC6 / NEC-MMC3 variant where reloading the counter
-//     to 0 from a "natural" 0 state does NOT fire IRQ. We implement the
-//     Sharp MMC3 behaviour (reload-to-0 always fires) because every other
-//     test in this suite — and the vast majority of commercial MMC3 ROMs —
-//     depend on the Sharp semantics. The two variants are mutually
-//     exclusive; we deliberately fail 6 in favour of passing 5.
-func TestMMC3BlarggSuite(t *testing.T) {
-	if _, err := os.Stat(blarggMMC3TestDir); err != nil {
-		t.Skipf("mmc3_test ROM directory not available: %v", err)
-	}
+// blarggCase describes one ROM in a blargg-style suite. When expectedToPass
+// is false the test is treated as a known-limitation skip with skipReason
+// printed; otherwise a missing "passed" or non-zero status fails the test.
+type blarggCase struct {
+	name           string
+	maxFrames      int
+	expectedToPass bool
+	skipReason     string
+}
 
-	type tc struct {
-		name           string
-		maxFrames      int
-		expectedToPass bool
-		skipReason     string
+// runBlarggSuite runs a slice of blargg ROM cases under t.Run. Shared by
+// the MMC3, PPU-blargg, and PPU-vbl-nmi suites — each has the same shape
+// (stat → runBlarggTest → status==0 + "passed" check, with optional
+// expected-fail rows that get t.Skip'd). When baseDir is empty, each
+// case's `name` is treated as the full ROM path.
+func runBlarggSuite(t *testing.T, baseDir string, cases []blarggCase) {
+	t.Helper()
+	if baseDir != "" {
+		if _, err := os.Stat(baseDir); err != nil {
+			t.Skipf("ROM directory not available: %v", err)
+		}
 	}
-	cases := []tc{
-		{name: "1-clocking.nes", maxFrames: 600, expectedToPass: true},
-		{name: "2-details.nes", maxFrames: 1200, expectedToPass: true},
-		{name: "3-A12_clocking.nes", maxFrames: 600, expectedToPass: true},
-		{name: "4-scanline_timing.nes", maxFrames: 1800, expectedToPass: true},
-		{name: "5-MMC3.nes", maxFrames: 1800, expectedToPass: true},
-		{name: "6-MMC6.nes", maxFrames: 1200, expectedToPass: false,
-			skipReason: "tests MMC6/NEC-MMC3 variant; we implement Sharp MMC3 (needed by test 5)"},
-	}
-
 	for _, c := range cases {
 		c := c
-		t.Run(c.name, func(t *testing.T) {
-			romPath := filepath.Join(blarggMMC3TestDir, c.name)
+		t.Run(filepath.Base(c.name), func(t *testing.T) {
+			romPath := c.name
+			if baseDir != "" {
+				romPath = filepath.Join(baseDir, c.name)
+			}
 			if _, err := os.Stat(romPath); err != nil {
 				t.Skipf("ROM missing: %v", err)
 			}
@@ -135,7 +126,6 @@ func TestMMC3BlarggSuite(t *testing.T) {
 				}
 				return
 			}
-			// Known limitation: log result but don't fail the suite.
 			if passed {
 				t.Logf("known-limitation test unexpectedly passed (%s) — promote it", c.skipReason)
 			} else {
@@ -144,4 +134,21 @@ func TestMMC3BlarggSuite(t *testing.T) {
 			t.Skip(c.skipReason)
 		})
 	}
+}
+
+// TestMMC3BlarggSuite runs each of the 6 MMC3 test ROMs. 6-MMC6 tests the
+// MMC6 / NEC-MMC3 variant where reload-to-0 from natural 0 does NOT fire
+// IRQ — directly conflicts with Sharp MMC3 (which every other test and
+// the vast majority of commercial MMC3 ROMs depend on). We pick Sharp and
+// skip 6.
+func TestMMC3BlarggSuite(t *testing.T) {
+	runBlarggSuite(t, blarggMMC3TestDir, []blarggCase{
+		{name: "1-clocking.nes", maxFrames: 600, expectedToPass: true},
+		{name: "2-details.nes", maxFrames: 1200, expectedToPass: true},
+		{name: "3-A12_clocking.nes", maxFrames: 600, expectedToPass: true},
+		{name: "4-scanline_timing.nes", maxFrames: 1800, expectedToPass: true},
+		{name: "5-MMC3.nes", maxFrames: 1800, expectedToPass: true},
+		{name: "6-MMC6.nes", maxFrames: 1200, expectedToPass: false,
+			skipReason: "tests MMC6/NEC-MMC3 variant; we implement Sharp MMC3 (needed by test 5)"},
+	})
 }
