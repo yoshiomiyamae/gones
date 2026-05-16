@@ -1,0 +1,604 @@
+package ppu
+
+import (
+	"encoding/binary"
+	"io"
+
+	"github.com/yoshiomiyamaegones/pkg/logger"
+	"github.com/yoshiomiyamaegones/pkg/memory"
+)
+
+// PPU represents the Picture Processing Unit
+type PPU struct {
+	// Registers
+	PPUCTRL   uint8 // $2000
+	PPUMASK   uint8 // $2001
+	PPUSTATUS uint8 // $2002
+	OAMADDR   uint8 // $2003
+	OAMDATA   uint8 // $2004
+	PPUSCROLL uint8 // $2005
+	PPUADDR   uint8 // $2006
+	PPUDATA   uint8 // $2007
+
+	// Internal registers
+	v     uint16 // VRAM address
+	t     uint16 // Temporary VRAM address
+	x     uint8  // Fine X scroll
+	xTemp uint8  // Temporary fine X scroll for raster effects
+	w     uint8  // Write toggle
+
+	// Scrolling
+	ScrollY uint8 // Y scroll position
+
+	// VRAM
+	VRAM [0x4000]uint8
+
+	// OAM (Object Attribute Memory)
+	OAM [256]uint8
+
+	// Frame buffer (256x240)
+	FrameBuffer [256 * 240]uint32
+
+	// Persistent frame buffer for games with intermittent rendering
+	PersistentFrameBuffer [256 * 240]uint32
+
+	// Track if any meaningful rendering occurred this frame
+	renderingOccurred bool
+	lastRenderFrame   uint64
+
+	// Timing
+	Cycle         int
+	Scanline      int
+	Frame         uint64
+	FrameComplete bool
+
+	// NMI
+	NMIRequested bool
+
+	// MapperIRQ is set when the cartridge raises an IRQ at the per-scanline
+	// Cartridge.Step() tick (cycle 260). The nes coordinator polls this flag
+	// each PPU cycle, but the flag only ever flips at the once-per-scanline
+	// tick — avoiding the per-cycle interface dispatch through Cartridge.
+	MapperIRQ bool
+
+	// cachedMirroring snapshots Cartridge.GetMirroring() at scanline start.
+	// mirrorNameTableAddress reads this every nametable access — looking it
+	// up via the cartridge interface every time was a measurable cost. MMC1
+	// / MMC3 / MMC4 can change mirroring at runtime, but only via CPU writes
+	// to mapper registers — refreshing once per scanline is fine-grained
+	// enough for every commercial game.
+	cachedMirroring int
+
+	// scanlineTiles is the 33-tile pre-fetch for the current visible
+	// scanline. Filled at Cycle 0 after the horizontal scroll restore;
+	// renderBackgroundPixelCached reads it as a simple array lookup
+	// instead of refetching identical nametable/pattern bytes ~8 times
+	// per tile. v.coarseX/fineX are fixed for the duration of a scanline
+	// in this PPU model (no per-cycle coarseX increments), so a single
+	// prefetch covers all 256 visible pixels.
+	scanlineTiles [33]BackgroundTile
+
+	// Rendering
+	PaletteManager *PaletteManager
+	currentSprites []SpriteInfo
+
+	// PPU read buffer for $2007 reads
+	readBuffer uint8
+
+	// Memory interface
+	Memory *memory.Memory
+
+	// Cartridge interface
+	Cartridge interface {
+		ReadCHR(addr uint16) uint8
+		WriteCHR(addr uint16, value uint8)
+		Step() // Called once per scanline for mapper IRQ
+		IsIRQPending() bool
+		ClearIRQ()
+		GetMirroring() int
+		NotifyA12(chrAddr uint16, renderingEnabled bool) // For MMC3 A12 edge detection
+	}
+}
+
+// NES screen dimensions in pixels (NTSC visible area).
+const (
+	ScreenWidth  = 256
+	ScreenHeight = 240
+)
+
+// PPUCTRL flags
+const (
+	PPUCTRLNameTable   = 0x03 // Base nametable address
+	PPUCTRLIncrement   = 0x04 // VRAM address increment
+	PPUCTRLSpriteTable = 0x08 // Sprite pattern table address
+	PPUCTRLBGTable     = 0x10 // Background pattern table address
+	PPUCTRLSpriteSize  = 0x20 // Sprite size
+	PPUCTRLMasterSlave = 0x40 // PPU master/slave select
+	PPUCTRLNMIEnable   = 0x80 // Generate NMI at VBlank
+)
+
+// PPUMASK flags
+const (
+	PPUMASKGreyscale      = 0x01 // Greyscale
+	PPUMASKBGLeft         = 0x02 // Show background in leftmost 8 pixels
+	PPUMASKSpriteLeft     = 0x04 // Show sprites in leftmost 8 pixels
+	PPUMASKBGShow         = 0x08 // Show background
+	PPUMASKSpriteShow     = 0x10 // Show sprites
+	PPUMASKRedEmphasize   = 0x20 // Emphasize red
+	PPUMASKGreenEmphasize = 0x40 // Emphasize green
+	PPUMASKBlueEmphasize  = 0x80 // Emphasize blue
+)
+
+// PPUSTATUS flags
+const (
+	PPUSTATUSSprite0Hit = 0x40 // Sprite 0 hit
+	PPUSTATUSVBlank     = 0x80 // VBlank flag
+)
+
+// Mirroring mode codes returned by Cartridge.GetMirroring() and mapper
+// GetMirroringMode() implementations. Single-screen modes are used by MMC1.
+const (
+	MirroringHorizontal        = 0
+	MirroringVertical          = 1
+	MirroringSingleScreenLower = 2
+	MirroringSingleScreenUpper = 3
+)
+
+// New creates a new PPU instance
+func New(mem *memory.Memory) *PPU {
+	return &PPU{
+		Memory:         mem,
+		Cycle:          0,
+		Scanline:       0,
+		PaletteManager: NewPaletteManager(),
+	}
+}
+
+// Reset resets the PPU to initial state
+func (p *PPU) Reset() {
+	p.PPUCTRL = 0
+	p.PPUMASK = 0
+	p.PPUSTATUS = 0
+	p.OAMADDR = 0
+	p.v = 0
+	p.t = 0
+	p.x = 0
+	p.w = 0
+	p.Cycle = 0
+	p.Scanline = 0
+	p.FrameComplete = false
+
+	// Initialize persistent buffer with background color to indicate "no content yet"
+	// Don't reset persistent buffer on Reset to preserve accumulated content
+	p.renderingOccurred = false
+}
+
+// SetCartridge sets the cartridge reference
+func (p *PPU) SetCartridge(cart interface {
+	ReadCHR(addr uint16) uint8
+	WriteCHR(addr uint16, value uint8)
+	Step()
+	IsIRQPending() bool
+	ClearIRQ()
+	GetMirroring() int
+	NotifyA12(chrAddr uint16, renderingEnabled bool)
+}) {
+	p.Cartridge = cart
+	p.refreshMirroringCache()
+}
+
+// Step executes one PPU cycle
+func (p *PPU) Step() {
+	// Update emphasis for palette manager
+	p.PaletteManager.SetEmphasis(p.PPUMASK & 0xE0)
+
+	// Render visible scanlines
+	if p.Scanline >= 0 && p.Scanline < 240 {
+		p.renderPixel()
+	}
+
+	// MMC3 IRQ + per-scanline Y increment both need: rendering enabled, and we're
+	// on a visible scanline (or pre-render). The Y increment makes mid-frame $2006
+	// writes propagate for split-screen effects (e.g. SMB3 title screen) — the
+	// renderer reads v.coarseY/fineY as the *current* scanline's row, not a
+	// frame-start scroll.
+	renderingActive := (p.Scanline >= 0 && p.Scanline < 240 || p.Scanline == -1) &&
+		(p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0
+	if renderingActive {
+		if p.Cycle == 260 && p.Cartridge != nil {
+			p.Cartridge.Step()
+			if p.Cartridge.IsIRQPending() {
+				p.MapperIRQ = true
+			}
+		}
+		if p.Cycle == 256 {
+			p.incrementY()
+		}
+	}
+
+	p.Cycle++
+	if p.Cycle >= 341 {
+		p.Cycle = 0
+		p.refreshMirroringCache()
+
+		p.Scanline++
+
+		if p.Scanline == 241 {
+			// VBlank start: set VBlank flag and request NMI if enabled.
+			// NOTE: sprite 0 hit and sprite overflow flags are NOT cleared
+			// here; per the NESdev wiki PPU rendering page they are cleared
+			// only on the pre-render scanline (-1) at cycle 1. Clearing
+			// them at VBlank start truncates the window where games can
+			// poll sprite 0 hit (e.g. SMB3 stage HUD split).
+			p.PPUSTATUS |= PPUSTATUSVBlank
+			if p.PPUCTRL&PPUCTRLNMIEnable != 0 {
+				p.NMIRequested = true
+			}
+		}
+
+		if p.Scanline >= 261 {
+			p.Scanline = -1 // Pre-render scanline
+
+			// Pre-render line: clear VBlank, sprite 0 hit, and sprite overflow
+			// flags (per NESdev: cleared at cycle 1 of the pre-render line).
+			p.PPUSTATUS &^= PPUSTATUSVBlank
+			p.PPUSTATUS &^= PPUSTATUSSprite0Hit
+			p.PPUSTATUS &^= 0x20 // sprite overflow
+
+			p.FrameComplete = true
+
+			// Handle frame completion and persistent buffer management
+			p.handleFrameCompletion()
+
+			p.Frame++
+		}
+	}
+
+	// Handle pre-render scanline (scanline -1/261)
+	if p.Scanline == -1 {
+		// Copy horizontal scroll components from t to v at start of pre-render line
+		if p.Cycle == 304 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+			// Copy vertical scroll components from t to v
+			p.v = (p.v & 0x841F) | (p.t & 0x7BE0)
+			// logger.LogPPU("Pre-render: Copy vertical scroll t=$%04X to v=$%04X", p.t, p.v)
+		}
+		if p.Cycle == 257 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+			// Copy horizontal scroll components from t to v
+			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
+			// logger.LogPPU("Pre-render: Copy horizontal scroll t=$%04X to v=$%04X", p.t, p.v)
+		}
+	}
+
+	// Handle visible scanlines
+	if p.Scanline >= 0 && p.Scanline < 240 {
+		// Copy horizontal scroll components from t to v at start of next scanline
+		if p.Cycle == 0 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
+			p.x = p.xTemp // Apply fine X scroll from temporary register
+			if p.PPUMASK&PPUMASKBGShow != 0 {
+				p.prefetchScanlineTiles()
+			}
+		}
+	}
+}
+
+// incrementY advances v's vertical position by one scanline per the NESdev
+// PPU rendering spec: fine Y first, with coarse Y / NT_Y wrap on overflow.
+func (p *PPU) incrementY() {
+	if (p.v & 0x7000) != 0x7000 {
+		p.v += 0x1000
+		return
+	}
+	p.v &= 0x8FFF // fine Y = 0
+	y := (p.v >> 5) & 0x1F
+	switch y {
+	case 29:
+		y = 0
+		p.v ^= 0x0800 // flip vertical nametable
+	case 31:
+		y = 0
+	default:
+		y++
+	}
+	p.v = (p.v &^ 0x03E0) | (y << 5)
+}
+
+// readVRAM reads from VRAM
+func (p *PPU) readVRAM(addr uint16) uint8 {
+	addr = addr % 0x4000
+
+	if addr < 0x2000 {
+		// Pattern table
+		if p.Cartridge != nil {
+			value := p.Cartridge.ReadCHR(addr)
+			// Debug: Log CHR reads via PPU - focus on pattern table reads with scanline info
+			if addr <= 0x1FFF && (addr < 0x100 || (addr >= 0x800 && addr < 0x900)) {
+				// Log first 256 bytes of each bank for key areas
+				logger.LogPPU("PPU CHR Read: scanline=%d, cycle=%d, addr=$%04X, value=$%02X, table=%s",
+					p.Scanline, p.Cycle, addr, value,
+					func() string {
+						if addr < 0x1000 {
+							return "BG"
+						} else {
+							return "SPR"
+						}
+					}())
+			}
+			return value
+		}
+		logger.LogPPU("ReadCHR: no cartridge, returning 0")
+		return 0
+	} else if addr < 0x3F00 {
+		// Nametable with mirroring
+		return p.readNameTable(addr)
+	} else if addr < 0x4000 {
+		// Palette
+		return p.PaletteManager.ReadPalette(uint8(addr & 0x1F))
+	}
+
+	return 0
+}
+
+// writeVRAM writes to VRAM
+func (p *PPU) writeVRAM(addr uint16, value uint8) {
+	addr = addr % 0x4000
+
+	if addr < 0x2000 {
+		// Pattern table (CHR)
+		if p.Cartridge != nil {
+			// Debug: Log CHR writes via PPU for first bytes
+			if addr <= 0x000F {
+				logger.LogPPU("PPU CHR Write: addr=$%04X, value=$%02X", addr, value)
+			}
+			p.Cartridge.WriteCHR(addr, value)
+		}
+	} else if addr < 0x3F00 {
+		// Nametable with mirroring
+		p.writeNameTable(addr, value)
+	} else if addr < 0x4000 {
+		// Palette
+		paletteAddr := uint8(addr & 0x1F)
+		p.PaletteManager.WritePalette(paletteAddr, value)
+	}
+}
+
+// GetFramebuffer returns the current framebuffer as RGBA bytes
+func (p *PPU) GetFramebuffer() []uint8 {
+	// Convert 32-bit framebuffer to RGBA bytes
+	rgba := make([]uint8, 256*240*4)
+
+	for i, pixel := range p.FrameBuffer {
+		// Extract RGB components from 32-bit pixel (0xAARRGGBB format)
+		r := uint8((pixel >> 16) & 0xFF) // Extract R correctly
+		g := uint8((pixel >> 8) & 0xFF)  // Extract G correctly
+		b := uint8(pixel & 0xFF)         // Extract B correctly
+		a := uint8((pixel >> 24) & 0xFF) // Use alpha from pixel
+
+		// Use RGBA order to match test pattern format
+		rgba[i*4+0] = r
+		rgba[i*4+1] = g
+		rgba[i*4+2] = b
+		rgba[i*4+3] = a
+
+		// Debug logging for first few pixels (disabled for performance)
+		// if i < 8 {
+		//	logger.LogPPU("Framebuffer[%d]: pixel=%08X -> RGBA(%02X,%02X,%02X,%02X)",
+		//		i, pixel, r, g, b, a)
+		// }
+	}
+
+	return rgba
+}
+
+// readNameTable reads from nametable with mirroring
+func (p *PPU) readNameTable(addr uint16) uint8 {
+	// Mirror the address based on cartridge mirroring mode
+	mirroredAddr := p.mirrorNameTableAddress(addr)
+	return p.VRAM[mirroredAddr]
+}
+
+// writeNameTable writes to nametable with mirroring
+func (p *PPU) writeNameTable(addr uint16, value uint8) {
+	// Mirror the address based on cartridge mirroring mode
+	mirroredAddr := p.mirrorNameTableAddress(addr)
+	p.VRAM[mirroredAddr] = value
+}
+
+// mirrorNameTableAddress applies nametable mirroring using the cached
+// mirroring mode (refreshed each scanline by refreshMirroringCache).
+func (p *PPU) mirrorNameTableAddress(addr uint16) uint16 {
+	offset := addr - 0x2000
+
+	switch p.cachedMirroring {
+	case MirroringHorizontal:
+		return p.applyHorizontalMirroring(offset) + 0x2000
+	case MirroringVertical:
+		return p.applyVerticalMirroring(offset) + 0x2000
+	case MirroringSingleScreenLower:
+		return (offset & 0x3FF) + 0x2000
+	case MirroringSingleScreenUpper:
+		return (offset & 0x3FF) + 0x2400
+	default:
+		// Four-screen — no mirroring, use logical address as-is.
+		return addr
+	}
+}
+
+// refreshMirroringCache reloads cachedMirroring from the cartridge. Called
+// at scanline boundaries; MMC1/MMC3/MMC4 change mirroring via CPU register
+// writes whose effect doesn't need to land mid-scanline.
+func (p *PPU) refreshMirroringCache() {
+	if p.Cartridge != nil {
+		p.cachedMirroring = p.Cartridge.GetMirroring()
+	} else {
+		p.cachedMirroring = MirroringHorizontal
+	}
+}
+
+// applyHorizontalMirroring applies horizontal mirroring.
+// $2000 and $2400 share physical NT_A; $2800 and $2C00 share physical NT_B.
+// Bit 11 (0x800) selects which physical nametable; bit 10 (0x400) is ignored.
+func (p *PPU) applyHorizontalMirroring(offset uint16) uint16 {
+	return ((offset & 0x800) >> 1) | (offset & 0x3FF)
+}
+
+// applyVerticalMirroring applies vertical mirroring.
+// $2000 and $2800 share physical NT_A; $2400 and $2C00 share physical NT_B.
+// Bit 10 (0x400) selects which physical nametable; bit 11 (0x800) is ignored.
+func (p *PPU) applyVerticalMirroring(offset uint16) uint16 {
+	return offset & 0x7FF
+}
+
+// IsMapperIRQPending returns whether mapper IRQ is pending. Reads the
+// cached flag set by Cartridge.Step() at cycle 260 — avoids the per-cycle
+// interface dispatch through Cartridge.IsIRQPending().
+func (p *PPU) IsMapperIRQPending() bool {
+	return p.MapperIRQ
+}
+
+// ClearMapperIRQ clears the cached flag and forwards to the cartridge so
+// the mapper's internal pending bit also drops.
+func (p *PPU) ClearMapperIRQ() {
+	p.MapperIRQ = false
+	if p.Cartridge != nil {
+		p.Cartridge.ClearIRQ()
+	}
+}
+
+// handleFrameCompletion manages persistent frame buffer and rendering state
+func (p *PPU) handleFrameCompletion() {
+	// Debug: Check first few pixels of FrameBuffer before completion handling
+	nonZeroPixels := 0
+	for i := 0; i < 256; i++ {
+		if p.FrameBuffer[i] != 0 {
+			nonZeroPixels++
+		}
+	}
+
+	// Store the rendering occurred flag before resetting
+	hadRendering := p.renderingOccurred
+
+	// Reset rendering flag for next frame FIRST
+	p.renderingOccurred = false
+
+	// If rendering occurred this frame, update the last render frame
+	if hadRendering {
+		p.lastRenderFrame = p.Frame
+		logger.LogPPU("Frame %d: Rendering occurred, updating persistent buffer", p.Frame)
+
+		// Ensure FrameBuffer has the rendered content for display
+		// (FrameBuffer should already have the content from renderPixel calls)
+	} else {
+		// Keep previous frame content to prevent flickering
+		// Don't copy persistent buffer unnecessarily
+	}
+}
+
+// ppuState is the on-disk layout for PPU state. Frame buffers are excluded;
+// they get redrawn from VRAM/OAM/palette by the next scanline anyway.
+type ppuState struct {
+	PPUCTRL, PPUMASK, PPUSTATUS, OAMADDR, OAMDATA uint8
+	PPUSCROLL, PPUADDR, PPUDATA                   uint8
+	V, T                                          uint16
+	X, XTemp, W                                   uint8
+	ScrollY                                       uint8
+	ReadBuffer                                    uint8
+	Cycle                                         int32
+	Scanline                                      int32
+	Frame                                         uint64
+	NMIRequested                                  bool
+	VRAM                                          [0x4000]uint8
+	OAM                                           [256]uint8
+	PaletteRAM                                    [32]uint8
+	PaletteEmphasis                               uint8
+}
+
+// SaveState writes PPU + palette state to w.
+func (p *PPU) SaveState(w io.Writer) error {
+	s := ppuState{
+		PPUCTRL: p.PPUCTRL, PPUMASK: p.PPUMASK, PPUSTATUS: p.PPUSTATUS,
+		OAMADDR: p.OAMADDR, OAMDATA: p.OAMDATA,
+		PPUSCROLL: p.PPUSCROLL, PPUADDR: p.PPUADDR, PPUDATA: p.PPUDATA,
+		V: p.v, T: p.t, X: p.x, XTemp: p.xTemp, W: p.w,
+		ScrollY:      p.ScrollY,
+		ReadBuffer:   p.readBuffer,
+		Cycle:        int32(p.Cycle),
+		Scanline:     int32(p.Scanline),
+		Frame:        p.Frame,
+		NMIRequested: p.NMIRequested,
+		VRAM:         p.VRAM,
+		OAM:          p.OAM,
+	}
+	if p.PaletteManager != nil {
+		s.PaletteRAM = p.PaletteManager.PaletteRAM
+		s.PaletteEmphasis = p.PaletteManager.Emphasis
+	}
+	return binary.Write(w, binary.LittleEndian, &s)
+}
+
+// LoadState restores PPU state written by SaveState.
+func (p *PPU) LoadState(r io.Reader) error {
+	var s ppuState
+	if err := binary.Read(r, binary.LittleEndian, &s); err != nil {
+		return err
+	}
+	p.PPUCTRL, p.PPUMASK, p.PPUSTATUS = s.PPUCTRL, s.PPUMASK, s.PPUSTATUS
+	p.OAMADDR, p.OAMDATA = s.OAMADDR, s.OAMDATA
+	p.PPUSCROLL, p.PPUADDR, p.PPUDATA = s.PPUSCROLL, s.PPUADDR, s.PPUDATA
+	p.v, p.t, p.x, p.xTemp, p.w = s.V, s.T, s.X, s.XTemp, s.W
+	p.ScrollY = s.ScrollY
+	p.readBuffer = s.ReadBuffer
+	p.Cycle, p.Scanline = int(s.Cycle), int(s.Scanline)
+	p.Frame = s.Frame
+	p.NMIRequested = s.NMIRequested
+	p.VRAM = s.VRAM
+	p.OAM = s.OAM
+	if p.PaletteManager != nil {
+		p.PaletteManager.PaletteRAM = s.PaletteRAM
+		p.PaletteManager.Emphasis = s.PaletteEmphasis
+	}
+	p.invalidateRenderCache()
+	return nil
+}
+
+// invalidateRenderCache drops any tile/sprite data cached by the renderer
+// for the current scanline. Call after restoring VRAM/OAM so the next
+// pixel fetch re-reads from the freshly loaded state instead of stale
+// cached patterns. The scanline tile prefetch will refill on the next
+// visible scanline's Cycle 0.
+func (p *PPU) invalidateRenderCache() {
+	p.scanlineTiles = [33]BackgroundTile{}
+	p.currentSprites = nil
+}
+
+// GetDisplayFrameBuffer returns the frame buffer that should be displayed
+// This method provides the correct buffer considering persistent rendering
+func (p *PPU) GetDisplayFrameBuffer() []uint32 {
+	// If recent rendering occurred, return current buffer
+	frameSinceLastRender := p.Frame - p.lastRenderFrame
+
+	// Debug logging disabled for production
+
+	if frameSinceLastRender <= 1 || p.renderingOccurred {
+		return p.FrameBuffer[:]
+	}
+
+	// Otherwise, return persistent buffer if it has content
+	if frameSinceLastRender < 3600 { // Keep visible for ~1 minute (3600 frames)
+		// Check if persistent buffer has meaningful content
+		nonZeroCount := 0
+		for i := 0; i < 100; i++ { // Sample first 100 pixels
+			if p.PersistentFrameBuffer[i] != 0 {
+				nonZeroCount++
+			}
+		}
+
+		// Debug logging disabled for production
+
+		return p.PersistentFrameBuffer[:]
+	}
+
+	// Fall back to current buffer
+	return p.FrameBuffer[:]
+}
+

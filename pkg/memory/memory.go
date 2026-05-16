@@ -1,0 +1,218 @@
+package memory
+
+import (
+	"io"
+
+	"github.com/yoshiomiyamaegones/pkg/logger"
+)
+
+// PPUBus is the subset of the PPU that the memory bus needs: CPU-visible
+// register I/O at $2000-$2007 (and mirrors).
+type PPUBus interface {
+	ReadRegister(addr uint16) uint8
+	WriteRegister(addr uint16, value uint8)
+}
+
+// APUBus is the subset of the APU that the memory bus needs: register
+// I/O at $4000-$4017.
+type APUBus interface {
+	ReadRegister(addr uint16) uint8
+	WriteRegister(addr uint16, value uint8)
+}
+
+// CartridgeBus is the subset of the cartridge that the memory bus needs:
+// PRG read/write at $6000-$FFFF. CHR access goes through the PPU, not
+// here.
+type CartridgeBus interface {
+	ReadPRG(addr uint16) uint8
+	WritePRG(addr uint16, value uint8)
+}
+
+// InputBus is the subset of the controller used by the memory bus:
+// strobe write to $4016 and serial read.
+type InputBus interface {
+	Read() uint8
+	Write(value uint8)
+}
+
+// CheatPatcher is an optional read-time byte patcher. Implementations
+// (e.g. Game Genie / PAR) get the address and the value the underlying
+// region returned, and may override it.
+type CheatPatcher interface {
+	Apply(addr uint16, current uint8) uint8
+}
+
+// Memory represents the NES memory map
+type Memory struct {
+	// CPU RAM (2KB, mirrored to fill 8KB)
+	RAM [2048]uint8
+
+	// Test memory for high addresses (for testing purposes)
+	HighMem [0xA000]uint8 // 0x6000-0xFFFF
+
+	PPU       PPUBus
+	APU       APUBus
+	Cartridge CartridgeBus
+	Input     InputBus
+
+	// Cheats is an optional read-time patcher. When set, every Read result
+	// is filtered through Cheats.Apply, letting Game Genie / PAR cheats
+	// override ROM and RAM bytes without modifying underlying storage.
+	// Hot path: keep the nil check ahead of the call to avoid the
+	// interface dispatch when no cheats are loaded.
+	Cheats CheatPatcher
+}
+
+// New creates a new Memory instance
+func New() *Memory {
+	return &Memory{}
+}
+
+// SetCartridge sets the cartridge reference
+func (m *Memory) SetCartridge(cart CartridgeBus) { m.Cartridge = cart }
+
+// SetPPU sets the PPU reference
+func (m *Memory) SetPPU(ppu PPUBus) { m.PPU = ppu }
+
+// SetAPU sets the APU reference
+func (m *Memory) SetAPU(apu APUBus) { m.APU = apu }
+
+// SetInput sets the input reference
+func (m *Memory) SetInput(input InputBus) { m.Input = input }
+
+// Read reads a byte from the given address. The cheat patcher (when set)
+// gets the last word so it can overlay Game Genie / RAM cheats on top of
+// whatever the underlying region returned.
+func (m *Memory) Read(addr uint16) uint8 {
+	v := m.read(addr)
+	if m.Cheats != nil {
+		return m.Cheats.Apply(addr, v)
+	}
+	return v
+}
+
+// read is the unpatched memory read — hot path, kept as small as possible.
+func (m *Memory) read(addr uint16) uint8 {
+	if addr < 0x2000 {
+		return m.RAM[addr&0x7FF]
+	}
+
+	if addr >= 0x6000 {
+		if m.Cartridge != nil {
+			return m.Cartridge.ReadPRG(addr)
+		}
+		index := addr - 0x6000
+		if index >= 0xA000 {
+			return 0
+		}
+		return m.HighMem[index]
+	}
+
+	if addr < 0x4000 {
+		if m.PPU != nil {
+			return m.PPU.ReadRegister(0x2000 + (addr & 0x7))
+		}
+		return 0
+	}
+
+	if addr == 0x4016 {
+		if m.Input != nil {
+			return m.Input.Read()
+		}
+		return 0
+	}
+
+	if addr == 0x4017 {
+		if m.APU != nil {
+			return m.APU.ReadRegister(addr)
+		}
+		return 0
+	}
+
+	if addr < 0x4020 {
+		if m.APU != nil {
+			return m.APU.ReadRegister(addr)
+		}
+		return 0
+	}
+
+	return 0
+}
+
+// Write writes a byte to the given address
+func (m *Memory) Write(addr uint16, value uint8) {
+
+	switch {
+	case addr < 0x2000:
+		// CPU RAM (0x0000-0x1FFF, mirrored every 0x800 bytes)
+		m.RAM[addr%0x800] = value
+
+	case addr < 0x4000:
+		// PPU registers (0x2000-0x3FFF, mirrored every 8 bytes)
+		if m.PPU != nil {
+			ppuAddr := 0x2000 + (addr & 0x7)
+			// Debug: Log $2006/$2007 writes specifically
+			if ppuAddr == 0x2006 || ppuAddr == 0x2007 {
+				logger.LogCPU("Memory Write PPU $%04X: value=$%02X", ppuAddr, value)
+			}
+			m.PPU.WriteRegister(ppuAddr, value)
+		}
+
+	case addr == 0x4014:
+		// OAM DMA
+		m.performOAMDMA(value)
+
+	case addr == 0x4016:
+		// Controller 1
+		if m.Input != nil {
+			m.Input.Write(value)
+		}
+
+	case addr < 0x4020:
+		// APU and I/O registers (0x4000-0x401F)
+		if m.APU != nil {
+			m.APU.WriteRegister(addr, value)
+		}
+	case addr >= 0x6000:
+		// Cartridge PRG ROM space (0x8000-0xFFFF)
+		if m.Cartridge != nil {
+			m.Cartridge.WritePRG(addr, value)
+		} else {
+			// For testing: use HighMem when no cartridge is present
+			index := addr - 0x6000
+			if index >= 0xA000 {
+				// Index out of bounds - this shouldn't happen
+				return
+			}
+			m.HighMem[index] = value
+		}
+
+	default:
+		// Unmapped addr > 0x4020 && addr < 0x6000
+	}
+}
+
+// SaveState writes the CPU work RAM contents (2KB) to w.
+func (m *Memory) SaveState(w io.Writer) error {
+	_, err := w.Write(m.RAM[:])
+	return err
+}
+
+// LoadState restores the CPU work RAM from r.
+func (m *Memory) LoadState(r io.Reader) error {
+	_, err := io.ReadFull(r, m.RAM[:])
+	return err
+}
+
+// performOAMDMA performs OAM DMA transfer
+func (m *Memory) performOAMDMA(page uint8) {
+	// Transfer 256 bytes from CPU memory to PPU OAM
+	baseAddr := uint16(page) << 8
+
+	for i := 0; i < 256; i++ {
+		value := m.Read(baseAddr + uint16(i))
+		if m.PPU != nil {
+			m.PPU.WriteRegister(0x2004, value)
+		}
+	}
+}
