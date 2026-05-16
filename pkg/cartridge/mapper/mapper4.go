@@ -43,20 +43,16 @@ type Mapper4 struct {
 	irqPending     bool
 	irqReloadFlag  bool // Set when $C001 is written
 
-	// A12 filtering for proper IRQ timing according to NESdev spec
-	a12Low        bool
-	a12LowCounter int     // Count M2 cycles while A12 is low
-	a12FilterPass bool    // Flag indicating A12 has been low for sufficient time
-	a12History    [8]bool // History of A12 states for precise filtering
-	a12HistoryPos int     // Position in A12 history buffer
-	m2CycleCount  int     // M2 clock cycle counter for precise timing
+	// lastA12High tracks the A12 line state across CPU-driven PPU register
+	// accesses ($2006 second-write, $2007 R/W increments). NotifyA12 reads
+	// this to detect 0→1 transitions; Step() (per-scanline path) resets it
+	// to false so the next CPU-driven A12 high write is treated as a fresh
+	// rising edge rather than being suppressed by a stale "still high".
+	lastA12High bool
 
 	// Bank counts
 	prgBankCount uint8
 	chrBankCount uint8
-
-	// MMC3 chip variant (true = Sharp MMC3, false = NEC MMC3)
-	isSharpMMC3 bool
 }
 
 // NewMapper4 creates a new MMC3 mapper instance
@@ -96,57 +92,18 @@ func NewMapper4(data *CartridgeData) *Mapper4 {
 		logger.LogMapper("MMC3 CHR bank R%d initialized to %d", i, m.bankRegisters[i])
 	}
 
-	// Initialize IRQ counter with MMC3 defaults
-	m.irqCounter = 0        // Start with 0 as per MMC3 spec
-	m.irqReloadValue = 0    // Default reload value
-	m.irqEnabled = false    // IRQ disabled by default
-	m.irqPending = false    // No pending IRQ
-	m.irqReloadFlag = false // No reload pending
-	m.a12Low = true         // Initialize A12 state
-	m.a12LowCounter = 0     // Initialize A12 low counter
-	m.a12FilterPass = false // Initialize A12 filter state
-	m.a12HistoryPos = 0     // Initialize history position
-	m.m2CycleCount = 0      // Initialize M2 cycle counter
-	m.isSharpMMC3 = true    // Default to Sharp MMC3 behavior (more common)
-
 	logger.LogInfo("CHR RAM initialized: size=%d bytes", len(data.CHRRAM))
 
 	return m
 }
 
-// Step advances the IRQ timer - called on A12 rising edge
+// Step is invoked by the PPU at the per-scanline A12-rising-edge tick.
+// Resets lastA12High so a CPU $2006 = $1xxx write between scanlines is
+// recognised as a fresh rising edge by NotifyA12 instead of being
+// suppressed as "still high".
 func (m *Mapper4) Step() {
-	// MMC3 IRQ counter decrements on A12 rising edge when rendering is enabled
-	if m.irqReloadFlag {
-		m.irqCounter = m.irqReloadValue
-		m.irqReloadFlag = false
-	} else if m.irqCounter == 0 {
-		m.irqCounter = m.irqReloadValue
-	} else {
-		m.irqCounter--
-	}
-
-	// Trigger IRQ based on chip variant behavior
-	var shouldTriggerIRQ bool
-	if m.isSharpMMC3 {
-		// Sharp MMC3: Generates an IRQ on each scanline when counter reaches 0
-		shouldTriggerIRQ = (m.irqCounter == 0 && m.irqEnabled)
-	} else {
-		// NEC MMC3: Generates only a single IRQ when counter reaches 0
-		// (More complex behavior - simplified for now)
-		shouldTriggerIRQ = (m.irqCounter == 0 && m.irqEnabled && m.irqReloadValue > 0)
-	}
-
-	if shouldTriggerIRQ {
-		m.irqPending = true
-		logger.LogMapper("MMC3 IRQ triggered (reload=%d, variant=%s)",
-			m.irqReloadValue, func() string {
-				if m.isSharpMMC3 {
-					return "Sharp"
-				}
-				return "NEC"
-			}())
-	}
+	m.clockIRQ()
+	m.lastA12High = false
 }
 
 // GetMirroringMode returns the current mirroring mode in the PPU's encoding
@@ -240,9 +197,10 @@ func (m *Mapper4) TriggerDump() {
 	m.DumpCHRRAM()
 }
 
-// mapper4State persists all runtime state. a12History/a12HistoryPos are no
-// longer used by the IRQ path (PPU drives Step() at cycle 260) but are kept
-// in the snapshot for stability with future revisions.
+// mapper4State persists all runtime state. lastA12High is intentionally
+// excluded — it's a CPU-side transient (re-derived from the next $2006
+// write) and snapshotting it across save states would freeze the next
+// edge detection at the wrong reference.
 type mapper4State struct {
 	BankRegisters  [8]uint8
 	BankSelect     uint8

@@ -27,6 +27,15 @@ type CPU struct {
 	// Interrupt flags
 	NMI bool
 	IRQ bool
+
+	// irqInhibitOneInstruction is the CLI/SEI/PLP one-instruction-delay
+	// quirk: on real 6502 the I-flag change from these opcodes takes effect
+	// AFTER the next instruction completes, so an IRQ asserted while I was
+	// previously set is serviced one instruction later than the flag change
+	// alone would suggest. blargg's mmc3_test 4 (scanline_timing) relies on
+	// this — the IRQ has to land after the `nop;nop;inc irq_flag` trio that
+	// follows CLI, not immediately on the first NOP.
+	irqInhibitOneInstruction bool
 }
 
 // Status flag bits
@@ -60,7 +69,15 @@ func (c *CPU) Step() int {
 		return 7
 	}
 
-	if c.IRQ && !c.getFlag(FlagInterrupt) {
+	// CLI/SEI/PLP delay their I-flag effect by one instruction (the IRQ
+	// poll for that next instruction sees the OLD I value). Model this as
+	// a one-shot inhibit: the instruction that ran CLI sets the flag,
+	// then the very next Step suppresses IRQ servicing, and the Step
+	// after that resumes normal sampling against the now-current I.
+	pollIRQ := c.IRQ && !c.getFlag(FlagInterrupt) && !c.irqInhibitOneInstruction
+	c.irqInhibitOneInstruction = false
+
+	if pollIRQ {
 		c.handleIRQ()
 		c.IRQ = false
 		return 7

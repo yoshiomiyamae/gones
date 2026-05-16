@@ -653,11 +653,13 @@ func (c *CPU) execSEC() int {
 
 func (c *CPU) execCLI() int {
 	c.setFlag(FlagInterrupt, false)
+	c.irqInhibitOneInstruction = true
 	return 2
 }
 
 func (c *CPU) execSEI() int {
 	c.setFlag(FlagInterrupt, true)
+	c.irqInhibitOneInstruction = true
 	return 2
 }
 
@@ -697,6 +699,8 @@ func (c *CPU) execPLP() int {
 	c.P = c.pop()
 	c.P |= FlagUnused
 	c.P &^= FlagBreak
+	// Same one-instruction delay as CLI/SEI for the I-flag change.
+	c.irqInhibitOneInstruction = true
 	return 4
 }
 

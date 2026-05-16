@@ -81,6 +81,14 @@ func (n *NES) Step() {
 	// in its vblank-wait loop because the NMI handler steals the flag.
 	cpuCycles := n.CPU.Step()
 
+	// The CPU instruction may have written $E000 (MMC3 IRQ ack) which
+	// drops the mapper's pending bit. Refresh the PPU's cached mirror so
+	// the level-triggered c.IRQ sync below sees the new state — without
+	// this, blargg's mmc3_test get_pending CLI fires a phantom IRQ.
+	if n.Cartridge != nil {
+		n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
+	}
+
 	if n.pendingNMI {
 		n.CPU.TriggerNMI()
 		n.pendingNMI = false
@@ -94,10 +102,11 @@ func (n *NES) Step() {
 			n.PPU.NMIRequested = false
 		}
 
-		if n.PPU.IsMapperIRQPending() {
-			n.CPU.TriggerIRQ()
-			n.PPU.ClearMapperIRQ()
-		}
+		// Level-triggered IRQ: track the mapper line every cycle so a
+		// mid-instruction mapper-pending rise from the PPU side is
+		// visible at the next instruction boundary, and an $E000 ack
+		// drops the line immediately rather than firing spuriously.
+		n.CPU.IRQ = n.PPU.MapperIRQ
 	}
 
 	for i := 0; i < cpuCycles; i++ {

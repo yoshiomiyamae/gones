@@ -66,6 +66,8 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 		return nil, fmt.Errorf("invalid iNES magic number")
 	}
 
+	mapperNumber := (cart.Header.Flags6 >> 4) | (cart.Header.Flags7 & 0xF0)
+
 	// Skip trainer if present
 	if cart.Header.Flags6&0x04 != 0 {
 		trainer := make([]uint8, 512)
@@ -92,27 +94,23 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 			return nil, fmt.Errorf("failed to read CHR ROM: %w", err)
 		}
 	} else {
-		// CHR RAM - determine size based on mapper
-		mapperNumber := (cart.Header.Flags6 >> 4) | (cart.Header.Flags7 & 0xF0)
-		chrRAMSize := 8192 // Default 8KB
-
-		// Mapper 4 (MMC3) games often use 32KB CHR RAM
+		// CHR RAM size — MMC3 games often expect 32KB, others use 8KB
+		chrRAMSize := 8192
 		if mapperNumber == 4 {
-			chrRAMSize = 32768 // 32KB for MMC3 games
+			chrRAMSize = 32768
 		}
-
 		cart.CHRRAM = make([]uint8, chrRAMSize)
-
-		// Initialize CHR RAM to 0x00 (normal expected state)
-		for i := range cart.CHRRAM {
-			cart.CHRRAM[i] = 0x00
-		}
 	}
 
-	// Initialize PRG RAM if battery backed
-	if cart.Header.Flags6&0x02 != 0 {
-		// Final Fantasy II requires 32KB PRG RAM, not 8KB
+	// PRG RAM: 32KB for battery-backed carts (e.g. Final Fantasy II needs
+	// the larger size). MMC3 carts always expose 8KB at $6000-$7FFF even
+	// without a battery — blargg's mmc3_test writes its status string there
+	// and many MMC3 games use it as work RAM.
+	switch {
+	case cart.Header.Flags6&0x02 != 0:
 		cart.PRGRAM = make([]uint8, 32768)
+	case mapperNumber == 4:
+		cart.PRGRAM = make([]uint8, 8192)
 	}
 
 	// Determine mirroring
@@ -124,10 +122,6 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 		cart.Mirroring = MirroringHorizontal
 	}
 
-	// Create mapper
-	mapperNumber := (cart.Header.Flags6 >> 4) | (cart.Header.Flags7 & 0xF0)
-
-	// Create mapper data
 	mapperData := &mapper.CartridgeData{
 		PRGROM: cart.PRGROM,
 		CHRROM: cart.CHRROM,

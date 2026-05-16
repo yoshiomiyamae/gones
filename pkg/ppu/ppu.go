@@ -55,11 +55,18 @@ type PPU struct {
 	// NMI
 	NMIRequested bool
 
-	// MapperIRQ is set when the cartridge raises an IRQ at the per-scanline
-	// Cartridge.Step() tick (cycle 260). The nes coordinator polls this flag
-	// each PPU cycle, but the flag only ever flips at the once-per-scanline
-	// tick — avoiding the per-cycle interface dispatch through Cartridge.
+	// MapperIRQ mirrors the cartridge's IRQ-pending line. nes.Step reads
+	// this every PPU cycle to set the CPU IRQ flag, so it MUST stay cheaper
+	// than an interface dispatch through Cartridge — every code path that
+	// can change mapper IRQ state (Step at the per-scanline tick,
+	// notifyCartridgeA12, and a post-CPU.Step refresh in nes.Step that
+	// catches $E000 acks) updates this field.
 	MapperIRQ bool
+
+	// mmc3FirstClockPending arms a one-shot extra A12-rise clock on the
+	// next rendering scanline (consumed by the BG=$1000 path in Step).
+	// Set on PPUMASK render-off→on; cleared after one $1000-mode tick.
+	mmc3FirstClockPending bool
 
 	// cachedMirroring snapshots Cartridge.GetMirroring() at scanline start.
 	// mirrorNameTableAddress reads this every nametable access — looking it
@@ -202,18 +209,36 @@ func (p *PPU) Step() {
 	// writes propagate for split-screen effects (e.g. SMB3 title screen) — the
 	// renderer reads v.coarseY/fineY as the *current* scanline's row, not a
 	// frame-start scroll.
-	renderingActive := (p.Scanline >= 0 && p.Scanline < 240 || p.Scanline == -1) &&
-		(p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0
-	if renderingActive {
-		if p.Cycle == 260 && p.Cartridge != nil {
+	renderingActive := (p.Scanline >= 0 && p.Scanline < 240 || p.Scanline == -1) && p.renderingEnabled()
+	if renderingActive && p.Cartridge != nil {
+		// MMC3 IRQ clocking — A12 rising edges with a ~3-CPU-cycle low
+		// filter. We pick the PPU cycle of the counted rise from PPUCTRL:
+		//   BG=$0000, Sprites=$1000: first sprite-pattern fetch (~261);
+		//     empirically cycle 273 matches blargg scanline_timing.
+		//   BG=$1000, Sprites=$0000: prefetch BG-pattern fetch after the
+		//     64-cycle sprite-fetch low window (~cycle 325, emu cycle 337).
+		// Plus a one-shot extra clock on the first rendering scanline
+		// after PPUMASK 0→on (the render-off period satisfies the filter
+		// for the first BG-pattern fetch at cycle ~5 / emu cycle 17;
+		// subsequent cycle-5 rises are filtered out by the short
+		// inter-scanline low gap).
+		bg1000 := p.PPUCTRL&PPUCTRLBGTable != 0
+		tickPerScanline := 273
+		if bg1000 {
+			tickPerScanline = 337
+		}
+		clockMapper := p.Cycle == tickPerScanline
+		if !clockMapper && p.mmc3FirstClockPending && bg1000 && p.Cycle == 17 {
+			clockMapper = true
+			p.mmc3FirstClockPending = false
+		}
+		if clockMapper {
 			p.Cartridge.Step()
-			if p.Cartridge.IsIRQPending() {
-				p.MapperIRQ = true
-			}
+			p.MapperIRQ = p.Cartridge.IsIRQPending()
 		}
-		if p.Cycle == 256 {
-			p.incrementY()
-		}
+	}
+	if renderingActive && p.Cycle == 256 {
+		p.incrementY()
 	}
 
 	p.Cycle++
@@ -257,22 +282,20 @@ func (p *PPU) Step() {
 	// Handle pre-render scanline (scanline -1/261)
 	if p.Scanline == -1 {
 		// Copy horizontal scroll components from t to v at start of pre-render line
-		if p.Cycle == 304 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+		if p.Cycle == 304 && p.renderingEnabled() {
 			// Copy vertical scroll components from t to v
 			p.v = (p.v & 0x841F) | (p.t & 0x7BE0)
-			// logger.LogPPU("Pre-render: Copy vertical scroll t=$%04X to v=$%04X", p.t, p.v)
 		}
-		if p.Cycle == 257 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+		if p.Cycle == 257 && p.renderingEnabled() {
 			// Copy horizontal scroll components from t to v
 			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
-			// logger.LogPPU("Pre-render: Copy horizontal scroll t=$%04X to v=$%04X", p.t, p.v)
 		}
 	}
 
 	// Handle visible scanlines
 	if p.Scanline >= 0 && p.Scanline < 240 {
 		// Copy horizontal scroll components from t to v at start of next scanline
-		if p.Cycle == 0 && (p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow)) != 0 {
+		if p.Cycle == 0 && p.renderingEnabled() {
 			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
 			p.x = p.xTemp // Apply fine X scroll from temporary register
 			if p.PPUMASK&PPUMASKBGShow != 0 {
@@ -449,20 +472,30 @@ func (p *PPU) applyVerticalMirroring(offset uint16) uint16 {
 	return offset & 0x7FF
 }
 
-// IsMapperIRQPending returns whether mapper IRQ is pending. Reads the
-// cached flag set by Cartridge.Step() at cycle 260 — avoids the per-cycle
-// interface dispatch through Cartridge.IsIRQPending().
+// IsMapperIRQPending returns the cached mapper IRQ line state. Kept in
+// sync with the cartridge by Step (per-scanline tick), notifyCartridgeA12
+// ($2006/$2007-driven CPU rises), and a post-CPU.Step refresh in nes.Step
+// (catches $E000 acks). nes.Step polls this every PPU cycle, so the field
+// read must stay cheaper than an interface dispatch.
 func (p *PPU) IsMapperIRQPending() bool {
 	return p.MapperIRQ
 }
 
-// ClearMapperIRQ clears the cached flag and forwards to the cartridge so
-// the mapper's internal pending bit also drops.
+// ClearMapperIRQ forwards to the cartridge so the mapper's internal pending
+// bit drops. Retained for explicit-clear callers; the regular IRQ servicing
+// path doesn't call this (it relies on the game writing $E000 to ack).
 func (p *PPU) ClearMapperIRQ() {
 	p.MapperIRQ = false
 	if p.Cartridge != nil {
 		p.Cartridge.ClearIRQ()
 	}
+}
+
+// renderingEnabled reports whether either background or sprite rendering is
+// turned on via PPUMASK. Read on every visible PPU cycle, so it's a single
+// AND/compare — inlined by the compiler.
+func (p *PPU) renderingEnabled() bool {
+	return p.PPUMASK&(PPUMASKBGShow|PPUMASKSpriteShow) != 0
 }
 
 // handleFrameCompletion manages persistent frame buffer and rendering state

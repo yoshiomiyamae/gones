@@ -341,9 +341,7 @@ func (p *PPU) renderPixel() {
 		return
 	}
 
-	// Check if rendering is enabled
-	renderingEnabled := (p.PPUMASK & (PPUMASKBGShow | PPUMASKSpriteShow)) != 0
-	if !renderingEnabled {
+	if !p.renderingEnabled() {
 		// Rendering disabled, just set background color
 		backgroundColor := p.PaletteManager.GetBackgroundColor(0, 0)
 		p.FrameBuffer[index] = backgroundColor
@@ -361,7 +359,7 @@ func (p *PPU) renderPixel() {
 	// Early exit if no sprites to check
 	if len(p.currentSprites) == 0 {
 		p.FrameBuffer[index] = bgColor
-		if renderingEnabled {
+		if p.renderingEnabled() {
 			p.PersistentFrameBuffer[index] = bgColor
 			p.renderingOccurred = true
 		}
@@ -400,7 +398,7 @@ func (p *PPU) renderPixel() {
 	p.FrameBuffer[index] = finalColor
 
 	// Update persistent frame buffer if rendering is enabled
-	if renderingEnabled {
+	if p.renderingEnabled() {
 		p.PersistentFrameBuffer[index] = finalColor
 		p.renderingOccurred = true
 	}

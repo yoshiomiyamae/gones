@@ -43,6 +43,7 @@ func (p *PPU) ReadRegister(addr uint16) uint8 {
 		}
 
 		p.incrementVRAMAddress()
+		p.notifyCartridgeA12()
 		return value
 	}
 	return 0
@@ -64,6 +65,14 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 		logger.LogPPU("Write PPUMASK: $%02X -> $%02X (BGShow=%v, SpriteShow=%v, Greyscale=%v)",
 			oldValue, value, (value&PPUMASKBGShow) != 0, (value&PPUMASKSpriteShow) != 0, (value&PPUMASKGreyscale) != 0)
 		p.PPUMASK = value
+		// Render off→on transition: arm the MMC3 "first A12 rise after long
+		// pause" one-shot so the next rendering scanline's cycle-5 BG fetch
+		// (in BG=$1000 mode) clocks the IRQ counter once before the normal
+		// per-scanline cycle-325 ticks take over. See PPU.Step for details.
+		const renderShow = PPUMASKBGShow | PPUMASKSpriteShow
+		if oldValue&renderShow == 0 && value&renderShow != 0 {
+			p.mmc3FirstClockPending = true
+		}
 	case 0x2003: // OAMADDR
 		p.OAMADDR = value
 	case 0x2004: // OAMDATA
@@ -101,6 +110,9 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 			if p.v < 0x2000 {
 				logger.LogPPU("PPUADDR set to CHR area: $%04X", p.v)
 			}
+			// The second $2006 write commits t into v, which can flip A12
+			// (bit 12) — MMC3 IRQ counter clocks on A12 0→1.
+			p.notifyCartridgeA12()
 		}
 	case 0x2007: // PPUDATA
 		logger.LogPPU("PPU Write $2007: vramAddr=$%04X, value=$%02X", p.v, value)
@@ -110,7 +122,22 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 		}
 		p.writeVRAM(p.v, value)
 		p.incrementVRAMAddress()
+		p.notifyCartridgeA12()
 	}
+}
+
+// notifyCartridgeA12 hands the current v register to the cartridge so MMC3
+// (and any future A12-IRQ mapper) can detect rising edges from CPU-driven
+// register accesses ($2006 second write, $2007 R/W increments).
+// Rendering-side toggles are handled by Cartridge.Step in the PPU loop.
+// We refresh PPU.MapperIRQ after the notification so the cached flag stays
+// in sync with any IRQ asserted by the CPU-side rise.
+func (p *PPU) notifyCartridgeA12() {
+	if p.Cartridge == nil {
+		return
+	}
+	p.Cartridge.NotifyA12(p.v, p.renderingEnabled())
+	p.MapperIRQ = p.Cartridge.IsIRQPending()
 }
 
 // incrementVRAMAddress advances `v` after a $2007 read or write by either 1
