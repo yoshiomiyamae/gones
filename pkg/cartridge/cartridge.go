@@ -23,6 +23,11 @@ type Cartridge struct {
 	// Mapper
 	Mapper mapper.Mapper
 
+	// cpuTicker caches the optional mapper.CPUTicker assertion so TickCPU
+	// (called once per CPU instruction in nes.Step) doesn't pay an
+	// interface-conversion cost on every dispatch.
+	cpuTicker mapper.CPUTicker
+
 	// Mirroring
 	Mirroring MirroringMode
 }
@@ -133,6 +138,9 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create mapper: %w", err)
 	}
+	if t, ok := cart.Mapper.(mapper.CPUTicker); ok {
+		cart.cpuTicker = t
+	}
 
 	return cart, nil
 }
@@ -192,6 +200,16 @@ func (c *Cartridge) WriteCHR(addr uint16, value uint8) {
 func (c *Cartridge) Step() {
 	if c.Mapper != nil {
 		c.Mapper.Step()
+	}
+}
+
+// TickCPU forwards a CPU-cycle count to mappers whose internal timing
+// runs on the CPU clock (FME-7's 16-bit IRQ counter). Mappers that
+// don't implement mapper.CPUTicker get nothing — the assertion is
+// resolved once in LoadFromReader.
+func (c *Cartridge) TickCPU(cycles int) {
+	if c.cpuTicker != nil {
+		c.cpuTicker.TickCPU(cycles)
 	}
 }
 

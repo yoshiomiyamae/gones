@@ -136,6 +136,12 @@ func (n *NES) Step() {
 		n.APU.Step()
 	}
 
+	// CPU-rate mapper timers (FME-7's IRQ counter).
+	if n.Cartridge != nil {
+		n.Cartridge.TickCPU(cpuCycles)
+		n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
+	}
+
 	// Level-triggered IRQ — OR together every line tied to the 6502's IRQ
 	// input. APU frame/DMC IRQs and mapper IRQs (MMC3) all share the same
 	// physical line; the CPU samples it once per cycle.

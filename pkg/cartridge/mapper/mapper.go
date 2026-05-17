@@ -33,6 +33,15 @@ type A12Notifier interface {
 	NotifyA12(chrAddr uint16, renderingEnabled bool)
 }
 
+// CPUTicker is the optional interface for mappers whose internal timing
+// runs on the CPU clock (e.g. Sunsoft FME-7's 16-bit IRQ counter, which
+// decrements every CPU cycle). nes.Step calls TickCPU once per
+// completed CPU instruction with that instruction's cycle count;
+// mappers without CPU-rate timing don't implement it.
+type CPUTicker interface {
+	TickCPU(cycles int)
+}
+
 // MirroringSource is the optional interface for mappers that override the
 // iNES-header mirroring mode dynamically (MMC1, MMC3 — anything with a
 // mirroring register). Falls back to the header value when the mapper
@@ -64,6 +73,8 @@ func NewMapper(mapperNumber uint8, data *CartridgeData) (Mapper, error) {
 		return NewMapper4(data), nil
 	case 10:
 		return NewMapper10(data), nil
+	case 69:
+		return NewMapper69(data), nil
 	case 70:
 		return NewMapper70(data), nil
 	default:
