@@ -46,6 +46,8 @@ type Mapper69 struct {
 	irqCounter    uint16
 	irqPending    bool
 
+	audio fme7Audio
+
 	prgBankCount uint8
 	chrBankCount uint16
 }
@@ -101,12 +103,9 @@ func (m *Mapper69) readPRGBank(rawBank uint8, offset uint16) uint8 {
 func (m *Mapper69) WritePRG(addr uint16, value uint8) {
 	switch {
 	case addr >= 0xE000:
-		// TODO(audio): FME-7 expansion-sound data port (3 square channels).
-		// Currently silently dropped; only Gimmick! uses it.
-		return
+		m.audio.writeAudioData(value)
 	case addr >= 0xC000:
-		// TODO(audio): FME-7 expansion-sound register-select port.
-		return
+		m.audio.writeAudioSelect(value)
 	case addr >= 0xA000:
 		m.writeParam(value)
 	case addr >= 0x8000:
@@ -162,8 +161,10 @@ func (m *Mapper69) Step() {}
 
 // TickCPU advances the 16-bit IRQ counter once per CPU cycle while the
 // counter-enable bit (D7 of reg 13) is set. Underflow (counter $0000 →
-// $FFFF) latches the IRQ if D0 is also set.
+// $FFFF) latches the IRQ if D0 is also set. Also drives the FME-7
+// expansion-audio phase counters.
 func (m *Mapper69) TickCPU(cycles int) {
+	m.audio.tick(cycles)
 	if m.irqControl&0x80 == 0 {
 		return
 	}
@@ -177,6 +178,12 @@ func (m *Mapper69) TickCPU(cycles int) {
 			m.irqCounter--
 		}
 	}
+}
+
+// AudioSample exposes the current FME-7 expansion-sound output for the
+// APU's mixer to layer on top of the 2A03 channels.
+func (m *Mapper69) AudioSample() float32 {
+	return m.audio.sample()
 }
 
 func (m *Mapper69) IsIRQPending() bool { return m.irqPending }

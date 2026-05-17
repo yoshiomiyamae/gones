@@ -64,6 +64,7 @@ func (n *NES) LoadCartridge(cart *cartridge.Cartridge) {
 	n.Cartridge = cart
 	n.Memory.SetCartridge(cart)
 	n.PPU.SetCartridge(cart)
+	n.APU.SetExpansionAudio(cart)
 }
 
 // Reset performs a power-on reset of the whole system. For the

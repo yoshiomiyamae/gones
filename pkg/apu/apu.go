@@ -12,6 +12,14 @@ type MemoryReader interface {
 	Read(address uint16) uint8
 }
 
+// ExpansionAudio is the optional interface the cartridge implements when
+// the mapper carries an on-board sound chip (FME-7, VRC6, etc.). The
+// APU's mixer pulls AudioSample() each output sample and adds it to the
+// 2A03 channel sum.
+type ExpansionAudio interface {
+	AudioSample() float32
+}
+
 // APU represents the Audio Processing Unit
 type APU struct {
 	// Pulse channels
@@ -44,6 +52,15 @@ type APU struct {
 
 	// Memory interface for DMC
 	Memory MemoryReader
+
+	// Expansion is the optional cartridge-side sound chip (FME-7,
+	// VRC6, etc.). nil for vanilla 2A03 carts.
+	Expansion ExpansionAudio
+
+	// ExpansionMuted suppresses the expansion-audio contribution to the
+	// mixer without disconnecting the chip — the chip keeps running so
+	// state stays in sync, just the audible part is dropped.
+	ExpansionMuted bool
 
 	// ChannelMute zeros a channel's contribution to the mixer without
 	// touching timer / sequencer state. Indexed by the channel ID
@@ -86,6 +103,17 @@ func (a *APU) ToggleChannelMute(ch int) (muted bool, name string) {
 func (a *APU) ToggleFilter() bool {
 	a.FilterEnabled = !a.FilterEnabled
 	return a.FilterEnabled
+}
+
+// ToggleExpansionMute flips the expansion-audio mixer mute and returns
+// the new muted state (true = expansion silenced). Returns false with
+// no effect when the cartridge has no expansion chip.
+func (a *APU) ToggleExpansionMute() (muted, hasExpansion bool) {
+	if a.Expansion == nil {
+		return false, false
+	}
+	a.ExpansionMuted = !a.ExpansionMuted
+	return a.ExpansionMuted, true
 }
 
 // PulseChannel represents a pulse wave channel
@@ -203,6 +231,11 @@ func New() *APU {
 // SetMemory sets the memory interface for DMC
 func (a *APU) SetMemory(mem MemoryReader) {
 	a.Memory = mem
+}
+
+// SetExpansionAudio attaches a cartridge-side audio chip; nil clears it.
+func (a *APU) SetExpansionAudio(src ExpansionAudio) {
+	a.Expansion = src
 }
 
 // Reset resets the APU to initial state

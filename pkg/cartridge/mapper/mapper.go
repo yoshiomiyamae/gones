@@ -42,6 +42,15 @@ type CPUTicker interface {
 	TickCPU(cycles int)
 }
 
+// AudioSource is the optional interface for mappers with expansion
+// sound (FME-7's three square channels, VRC6/VRC7 etc. once those
+// land). The APU's mixer pulls AudioSample() per output sample and
+// mixes the value into the 2A03 channel sum. Range is the same 0..1
+// the APU uses internally.
+type AudioSource interface {
+	AudioSample() float32
+}
+
 // MirroringSource is the optional interface for mappers that override the
 // iNES-header mirroring mode dynamically (MMC1, MMC3 — anything with a
 // mirroring register). Falls back to the header value when the mapper

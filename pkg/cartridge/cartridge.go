@@ -28,6 +28,10 @@ type Cartridge struct {
 	// interface-conversion cost on every dispatch.
 	cpuTicker mapper.CPUTicker
 
+	// audioSource caches the optional mapper.AudioSource assertion
+	// (FME-7 expansion sound, etc.); the APU's mixer pulls per sample.
+	audioSource mapper.AudioSource
+
 	// Mirroring
 	Mirroring MirroringMode
 }
@@ -141,6 +145,9 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 	if t, ok := cart.Mapper.(mapper.CPUTicker); ok {
 		cart.cpuTicker = t
 	}
+	if s, ok := cart.Mapper.(mapper.AudioSource); ok {
+		cart.audioSource = s
+	}
 
 	return cart, nil
 }
@@ -211,6 +218,15 @@ func (c *Cartridge) TickCPU(cycles int) {
 	if c.cpuTicker != nil {
 		c.cpuTicker.TickCPU(cycles)
 	}
+}
+
+// AudioSample returns the cartridge's expansion-sound mixer output
+// (0 when the mapper has no audio chip). Used by the APU.
+func (c *Cartridge) AudioSample() float32 {
+	if c.audioSource != nil {
+		return c.audioSource.AudioSample()
+	}
+	return 0
 }
 
 // IsIRQPending returns whether mapper IRQ is pending

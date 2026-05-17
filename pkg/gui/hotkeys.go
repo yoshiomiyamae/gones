@@ -36,6 +36,18 @@ func (g *NESGUI) toggleCheats() {
 func (g *NESGUI) toggleFilter() {
 	logger.LogInfo("Analog filter chain: %v", g.nes.APU.ToggleFilter())
 }
+func (g *NESGUI) toggleExpansionAudio() {
+	muted, ok := g.nes.APU.ToggleExpansionMute()
+	if !ok {
+		logger.LogInfo("Expansion audio: cartridge has no expansion sound chip")
+		return
+	}
+	state := "ON"
+	if muted {
+		state = "MUTED"
+	}
+	logger.LogInfo("Expansion audio: %s", state)
+}
 
 // hotkeyTable lists the simple, fixed-modifier hotkeys. F1-F10 (variable
 // Ctrl modifier for save vs. load) is handled inline in handleHotkey
@@ -49,7 +61,8 @@ var hotkeyTable = []hotkey{
 	{sdl.K_r, sdl.KMOD_CTRL, (*NESGUI).resetNES, false},
 	{sdl.K_h, sdl.KMOD_CTRL, (*NESGUI).toggleCheats, false},
 	{sdl.K_e, sdl.KMOD_CTRL, (*NESGUI).toggleRecording, false},
-	{sdl.K_6, 0, (*NESGUI).toggleFilter, false},
+	{sdl.K_6, 0, (*NESGUI).toggleExpansionAudio, false},
+	{sdl.K_7, 0, (*NESGUI).toggleFilter, false},
 }
 
 // isHotkeyKey reports whether a key is one of those the emulator owns. Used
@@ -58,10 +71,10 @@ var hotkeyTable = []hotkey{
 func isHotkeyKey(k sdl.Keycode) bool {
 	return k == sdl.K_ESCAPE || k == sdl.K_TAB ||
 		(k >= sdl.K_F1 && k <= sdl.K_F12) ||
-		(k >= sdl.K_1 && k <= sdl.K_6)
+		(k >= sdl.K_1 && k <= sdl.K_7)
 }
 
-// handleHotkey processes emulator-level hotkeys (Esc/Tab/F1-F12/1-6).
+// handleHotkey processes emulator-level hotkeys (Esc/Tab/F1-F12/1-7).
 // Returns true if the event was consumed; false means it's a game input and
 // should be forwarded to the InputManager.
 func (g *NESGUI) handleHotkey(e *sdl.KeyboardEvent) bool {

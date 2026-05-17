@@ -52,6 +52,9 @@ func (a *APU) mixChannels() float32 {
 	}
 
 	output := pulseOut + tndOut
+	if a.Expansion != nil && !a.ExpansionMuted {
+		output += a.Expansion.AudioSample()
+	}
 	if output > 1.0 {
 		output = 1.0
 	}
