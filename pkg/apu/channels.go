@@ -92,20 +92,16 @@ func (a *APU) stepNoise() {
 	}
 }
 
-// stepDMC steps the DMC channel
+// stepDMC steps the DMC channel. The 4-bit Rate register selects one
+// of 16 periods from dmcRates (Rate 0 = slowest = 428 CPU cycles, NOT
+// "disabled"), so the condition has to fire even when Rate==0.
 func (a *APU) stepDMC() {
 	if !a.DMC.Enabled {
 		return
 	}
-
-	// DMC timer countdown
-	if a.DMC.Rate > 0 {
-		// Use rate table for proper timing
-		dmcPeriod := dmcRates[a.DMC.Rate&0x0F]
-		// Simplified timer implementation - needs proper CPU cycle timing
-		if a.Cycles%uint64(dmcPeriod) == 0 {
-			a.stepDMCSample()
-		}
+	dmcPeriod := dmcRates[a.DMC.Rate&0x0F]
+	if a.Cycles%uint64(dmcPeriod) == 0 {
+		a.stepDMCSample()
 	}
 }
 

@@ -55,6 +55,10 @@ func NewNES() *NES {
 	nes.Memory.SetAPU(nes.APU)
 	nes.Memory.SetInput(nes.Input)
 	nes.Memory.Cheats = nes.Cheats
+	// APU's DMC channel reads sample bytes from CPU memory. Without
+	// this, the DMC's memory reader skips every fetch and the channel
+	// emits only the clicks from $4011 direct writes.
+	nes.APU.SetMemory(nes.Memory)
 
 	return nes
 }

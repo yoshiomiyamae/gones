@@ -104,11 +104,11 @@ func (a *APU) writeDMC(reg uint16, value uint8) {
 		
 	case 2: // $4012 - Sample address
 		a.DMC.SampleAddress = 0xC000 + (uint16(value) * 64)
-		
+
 	case 3: // $4013 - Sample length
+		// Just sets the latch; playback is started by a $4015 write
+		// with bit 4 set while CurrentLength is 0.
 		a.DMC.SampleLength = (uint16(value) * 16) + 1
-		a.DMC.CurrentLength = a.DMC.SampleLength
-		a.DMC.CurrentAddress = a.DMC.SampleAddress
 	}
 }
 
@@ -122,7 +122,7 @@ func (a *APU) writeStatus(value uint8) {
 	a.DMC.Enabled = (value & 0x10) != 0
 	// Any $4015 write acknowledges a pending DMC IRQ.
 	a.DMC.InterruptFlag = false
-	
+
 	// Clear length counters for disabled channels
 	if !a.Pulse1.Enabled {
 		a.Pulse1.Length.Value = 0
@@ -136,8 +136,16 @@ func (a *APU) writeStatus(value uint8) {
 	if !a.Noise.Enabled {
 		a.Noise.Length.Value = 0
 	}
+	// DMC start/stop: clearing bit 4 zeros bytes-remaining (silences
+	// after the current byte plays out); setting bit 4 restarts the
+	// sample only if it isn't already active. NESdev's APU DMC page —
+	// without this initial load CurrentLength stays 0 and the channel
+	// only emits the click from any $4011 write.
 	if !a.DMC.Enabled {
 		a.DMC.CurrentLength = 0
+	} else if a.DMC.CurrentLength == 0 {
+		a.DMC.CurrentLength = a.DMC.SampleLength
+		a.DMC.CurrentAddress = a.DMC.SampleAddress
 	}
 }
 
