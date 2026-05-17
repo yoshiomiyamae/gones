@@ -90,6 +90,10 @@ func (a *APU) writeDMC(reg uint16, value uint8) {
 	switch reg {
 	case 0: // $4010 - Rate, loop, IRQ
 		a.DMC.IRQEnabled = (value & 0x80) != 0
+		// Clearing the IRQ-enable bit also acknowledges any latched DMC IRQ.
+		if !a.DMC.IRQEnabled {
+			a.DMC.InterruptFlag = false
+		}
 		a.DMC.Loop = (value & 0x40) != 0
 		a.DMC.Rate = value & 0x0F
 		// Set DMC timer based on rate
@@ -116,6 +120,8 @@ func (a *APU) writeStatus(value uint8) {
 	a.Triangle.Enabled = (value & 0x04) != 0
 	a.Noise.Enabled = (value & 0x08) != 0
 	a.DMC.Enabled = (value & 0x10) != 0
+	// Any $4015 write acknowledges a pending DMC IRQ.
+	a.DMC.InterruptFlag = false
 	
 	// Clear length counters for disabled channels
 	if !a.Pulse1.Enabled {

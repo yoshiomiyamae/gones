@@ -680,13 +680,13 @@ func (c *CPU) execSEC() int {
 
 func (c *CPU) execCLI() int {
 	c.setFlag(FlagInterrupt, false)
-	c.irqInhibitOneInstruction = true
+	c.iWriteLate = true
 	return 2
 }
 
 func (c *CPU) execSEI() int {
 	c.setFlag(FlagInterrupt, true)
-	c.irqInhibitOneInstruction = true
+	c.iWriteLate = true
 	return 2
 }
 
@@ -726,8 +726,9 @@ func (c *CPU) execPLP() int {
 	c.P = c.pop()
 	c.P |= FlagUnused
 	c.P &^= FlagBreak
-	// Same one-instruction delay as CLI/SEI for the I-flag change.
-	c.irqInhibitOneInstruction = true
+	// PLP's I-flag write also lands at the cycle 6502 polls for IRQ, so
+	// the end-of-instruction poll sees the pre-PLP I value.
+	c.iWriteLate = true
 	return 4
 }
 
@@ -774,12 +775,14 @@ func (c *CPU) branch(condition bool) int {
 		newPC := uint16(int32(c.PC) + int32(offset))
 		c.PC = newPC
 
-		// Branch taken: 3 cycles base, +1 if page crossed
-		cycles := 3
+		// Branch taken: 3 cycles base, +1 if page crossed.
 		if (oldPC & 0xFF00) != (newPC & 0xFF00) {
-			cycles = 4 // Page boundary crossed
+			return 4
 		}
-		return cycles
+		// Taken non-page-cross branches drop the cycle-2 IRQ poll; the
+		// IRQ has to wait one more instruction.
+		c.suppressPostPoll = true
+		return 3
 	}
 
 	// Branch not taken: 2 cycles
@@ -1115,8 +1118,7 @@ func (c *CPU) execBRK() int {
 	c.PC++ // BRK is effectively a 2-byte instruction
 	c.push16(c.PC)
 	c.push(c.P | FlagBreak)
-	c.setFlag(FlagInterrupt, true)
-	c.PC = c.read16(0xFFFE) // IRQ vector
+	c.vector(0xFFFE)
 	return 7
 }
 

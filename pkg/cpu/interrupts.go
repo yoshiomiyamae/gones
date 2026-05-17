@@ -29,18 +29,34 @@ func (c *CPU) handleNMI() {
 	logger.LogCPU("NMI triggered: PC=$%04X, pushing to stack", c.PC)
 	c.push16(c.PC)
 	c.push(c.P)
-	c.setFlag(FlagInterrupt, true)
-	nmiVector := c.read16(0xFFFA)
-	logger.LogCPU("NMI vector: $%04X, jumping to NMI handler", nmiVector)
-	c.PC = nmiVector
+	c.vector(0xFFFA)
 }
 
 // handleIRQ handles Interrupt Request
 func (c *CPU) handleIRQ() {
 	c.push16(c.PC)
 	c.push(c.P)
+	c.vector(0xFFFE)
+}
+
+// vector loads PC from the requested interrupt vector, redirecting to the
+// NMI vector when NMI is asserted right now (the "NMI hijack" quirk).
+//
+// Reachability: with whole-instruction stepping the c.NMI flag is only
+// updated between CPU.Step calls, so the hijack catches NMIs already
+// pending when handleIRQ/execBRK starts — but those are picked off
+// first by the NMI-priority check in CPU.Step. Modelling a true hijack
+// (NMI asserted between an IRQ/BRK's push and its vector fetch) needs
+// sub-instruction CPU/PPU interleaving, which is why blargg's
+// nmi_and_brk / nmi_and_irq remain skipped. The routing is correct, the
+// timing isn't.
+func (c *CPU) vector(addr uint16) {
+	if c.NMI {
+		c.NMI = false
+		addr = 0xFFFA
+	}
 	c.setFlag(FlagInterrupt, true)
-	c.PC = c.read16(0xFFFE)
+	c.PC = c.read16(addr)
 }
 
 // TriggerNMI triggers a Non-Maskable Interrupt

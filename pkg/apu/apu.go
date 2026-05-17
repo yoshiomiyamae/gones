@@ -150,6 +150,11 @@ type DMCChannel struct {
 	Silence        bool
 	SampleBuffer   uint8
 	BufferEmpty    bool
+	// InterruptFlag latches when a non-looping sample finishes with
+	// IRQEnabled set. Cleared by $4015 write (any value) or by writing
+	// $4010 with bit 7 clear. Drives the CPU IRQ line alongside the APU
+	// frame IRQ.
+	InterruptFlag bool
 }
 
 // SweepUnit represents a sweep unit
@@ -335,7 +340,7 @@ func (a *APU) ReadRegister(addr uint16) uint8 {
 		if a.FrameIRQ {
 			status |= 0x40
 		}
-		if a.DMC.IRQEnabled && a.DMC.CurrentLength == 0 {
+		if a.DMC.InterruptFlag {
 			status |= 0x80
 		}
 

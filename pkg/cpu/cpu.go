@@ -28,14 +28,33 @@ type CPU struct {
 	NMI bool
 	IRQ bool
 
-	// irqInhibitOneInstruction is the CLI/SEI/PLP one-instruction-delay
-	// quirk: on real 6502 the I-flag change from these opcodes takes effect
-	// AFTER the next instruction completes, so an IRQ asserted while I was
-	// previously set is serviced one instruction later than the flag change
-	// alone would suggest. blargg's mmc3_test 4 (scanline_timing) relies on
-	// this — the IRQ has to land after the `nop;nop;inc irq_flag` trio that
-	// follows CLI, not immediately on the first NOP.
-	irqInhibitOneInstruction bool
+	// pendingIRQ latches a successful IRQ poll from the previous
+	// instruction's end. The CPU samples its IRQ line during each
+	// instruction; if I=0 at the sample, the IRQ sequence runs after the
+	// current instruction completes (and before the next one starts).
+	pendingIRQ bool
+
+	// iWriteLate is set by CLI/SEI/PLP to mark that this instruction's I
+	// write happens AFTER the IRQ poll cycle. The end-of-instruction poll
+	// uses the pre-instruction I instead of the just-written value. This
+	// is the documented "CLI/SEI/PLP delay" on the 6502 — blargg's
+	// cli_latency test exercises every variant.
+	iWriteLate bool
+
+	// pollIIsSet is true when pollI is meaningful (the last CPU.Step
+	// finished a normal instruction and captured its IRQ-poll I value).
+	// PollIRQ runs AFTER the PPU/APU have advanced for this instruction's
+	// cycles, so it sees IRQ assertions that happened mid-instruction.
+	pollI      bool
+	pollIIsSet bool
+
+	// suppressPostPoll skips the end-of-instruction IRQ poll for the
+	// just-finished instruction. A taken non-page-crossing branch sets
+	// this — the 6502's poll for that case lands on the dummy "fix-up"
+	// cycle and is dropped, so an IRQ asserted during the branch is
+	// taken only AFTER the following instruction runs (blargg's
+	// branch_delays_irq test).
+	suppressPostPoll bool
 
 	// extraCycles is added to the next CPU.Step's returned cycle count.
 	// Currently used for OAM DMA (STA $4014 halts the CPU for 513 extra
@@ -68,34 +87,30 @@ func New(mem *memory.Memory) *CPU {
 
 // Step executes one instruction and returns cycles taken
 func (c *CPU) Step() int {
-	// Handle interrupts
 	if c.NMI {
 		logger.LogCPU("NMI triggered at PC=$%04X", c.PC)
 		c.handleNMI()
 		c.NMI = false
+		c.pollIIsSet = false
 		return 7
 	}
 
-	// CLI/SEI/PLP delay their I-flag effect by one instruction (the IRQ
-	// poll for that next instruction sees the OLD I value). Model this as
-	// a one-shot inhibit: the instruction that ran CLI sets the flag,
-	// then the very next Step suppresses IRQ servicing, and the Step
-	// after that resumes normal sampling against the now-current I.
-	pollIRQ := c.IRQ && !c.getFlag(FlagInterrupt) && !c.irqInhibitOneInstruction
-	c.irqInhibitOneInstruction = false
-
-	if pollIRQ {
+	// IRQ pending from the previous instruction's poll fires at this
+	// instruction boundary, before the next opcode is fetched.
+	if c.pendingIRQ {
+		c.pendingIRQ = false
 		c.handleIRQ()
-		c.IRQ = false
+		c.pollIIsSet = false
 		return 7
 	}
 
-	// Fetch instruction
-	opcode := c.read(c.PC)
+	// Snapshot I before the instruction runs; CLI/SEI/PLP's poll uses
+	// this pre-write value.
+	preI := c.getFlag(FlagInterrupt)
 
+	opcode := c.read(c.PC)
 	c.PC++
 
-	// Execute instruction
 	cycles := c.executeInstruction(opcode)
 	// Add any extra cycles charged by side effects (e.g. OAM DMA on a
 	// $4014 write, which stalls the CPU for 513 cycles).
@@ -103,7 +118,34 @@ func (c *CPU) Step() int {
 	c.extraCycles = 0
 	c.Cycles += cycles
 
+	// Capture the I value the post-instruction IRQ poll should use. The
+	// poll itself runs in PollIRQ, after the bus has caught up with this
+	// instruction's PPU/APU side effects.
+	c.pollI = c.getFlag(FlagInterrupt)
+	if c.iWriteLate {
+		c.pollI = preI
+		c.iWriteLate = false
+	}
+	c.pollIIsSet = !c.suppressPostPoll
+	c.suppressPostPoll = false
+
 	return cycles
+}
+
+// PollIRQ samples the IRQ line for the just-completed instruction. Called
+// by NES.Step after the PPU and APU have advanced through this
+// instruction's cycles, so IRQ assertions that happened mid-instruction
+// (MMC3 scanline counter, APU frame IRQ) are visible to the poll. A
+// successful poll latches pendingIRQ, which the next Step services
+// before fetching the next opcode.
+func (c *CPU) PollIRQ() {
+	if !c.pollIIsSet {
+		return
+	}
+	c.pollIIsSet = false
+	if c.IRQ && !c.pollI {
+		c.pendingIRQ = true
+	}
 }
 
 // executeInstruction is implemented in instructions.go.

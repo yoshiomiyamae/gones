@@ -128,7 +128,7 @@ func (a *APU) stepDMCSample() {
 				a.DMC.CurrentLength = a.DMC.SampleLength
 				a.DMC.CurrentAddress = a.DMC.SampleAddress
 			} else if a.DMC.IRQEnabled {
-				// Generate IRQ (would need CPU interface)
+				a.DMC.InterruptFlag = true
 			}
 		}
 	}

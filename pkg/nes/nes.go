@@ -114,14 +114,21 @@ func (n *NES) Step() {
 		if n.PPU.ConsumeNMI() {
 			n.nmiDelay = true
 		}
-
-		// Level-triggered IRQ tracking.
-		n.CPU.IRQ = n.PPU.MapperIRQ
 	}
 
 	for i := 0; i < cpuCycles; i++ {
 		n.APU.Step()
 	}
+
+	// Level-triggered IRQ — OR together every line tied to the 6502's IRQ
+	// input. APU frame/DMC IRQs and mapper IRQs (MMC3) all share the same
+	// physical line; the CPU samples it once per cycle.
+	n.CPU.IRQ = n.PPU.MapperIRQ || n.APU.FrameIRQ || n.APU.DMC.InterruptFlag
+
+	// Run the just-completed instruction's end-of-cycle IRQ poll now that
+	// the bus has caught up with this instruction's PPU/APU output. An
+	// MMC3 IRQ asserted mid-instruction is visible here.
+	n.CPU.PollIRQ()
 
 	n.Cycles += uint64(cpuCycles)
 }
