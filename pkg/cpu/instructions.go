@@ -624,8 +624,8 @@ func (c *CPU) execCMP(mode AddressingMode) int {
 	c.setFlag(FlagCarry, c.A >= value)
 	c.setZN(result)
 
-	cycles := getAddressingInfo(0xC9).Cycles // Base cycles for CMP
-	if pageCrossed {
+	cycles := getLogicalCycles(mode)
+	if pageCrossed && (mode == AddrAbsoluteX || mode == AddrAbsoluteY || mode == AddrIndirectIndexed) {
 		cycles++
 	}
 	return cycles
