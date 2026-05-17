@@ -52,6 +52,7 @@ func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, t
 	)
 
 	signatureSeen := false
+	prevStatus := uint8(0)
 	for frames = 0; frames < maxFrames; frames++ {
 		system.StepFrame()
 
@@ -66,8 +67,15 @@ func runBlarggTest(t *testing.T, romPath string, maxFrames int) (status uint8, t
 		if !signatureSeen {
 			continue
 		}
-		if status == resetFlag {
-			system.Reset()
+		// $81 means "press reset". Soft-reset only on the rising edge —
+		// the test ROM holds $81 across its post-reset init until it
+		// rewrites $80, so resetting every frame would loop forever.
+		isReset := status == resetFlag
+		if isReset && prevStatus != resetFlag {
+			system.SoftReset()
+		}
+		prevStatus = status
+		if isReset {
 			continue
 		}
 		if status < runFlag && status != 0x00 {

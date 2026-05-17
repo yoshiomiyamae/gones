@@ -28,7 +28,7 @@ type hotkey struct {
 func (g *NESGUI) quit()        { g.running = false }
 func (g *NESGUI) toggleTurbo() { g.turbo = !g.turbo; logger.LogInfo("Turbo mode: %v", g.turbo) }
 func (g *NESGUI) toggleFPS()   { g.showFPS = !g.showFPS }
-func (g *NESGUI) resetNES()    { g.nes.Reset(); logger.LogInfo("NES reset") }
+func (g *NESGUI) resetNES()    { g.nes.SoftReset(); logger.LogInfo("NES reset") }
 func (g *NESGUI) toggleCheats() {
 	on := g.nes.Cheats.ToggleAll()
 	logger.LogInfo("Cheats (%d loaded): %v", g.nes.Cheats.Count(), on)

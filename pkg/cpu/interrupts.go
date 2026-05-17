@@ -10,18 +10,27 @@ import (
 	"github.com/yoshiomiyamaegones/pkg/logger"
 )
 
-// Reset resets the CPU to initial state
+// Reset performs a power-on reset: A,X,Y=0, P=$34 (B|I|U set in the
+// pushed copy), S=$FD, PC loaded from $FFFC. blargg's cpu_reset suite
+// distinguishes this from SoftReset.
 func (c *CPU) Reset() {
 	c.A = 0
 	c.X = 0
 	c.Y = 0
 	c.SP = 0xFD
 	c.P = FlagUnused | FlagInterrupt
-
-	// Read reset vector
-	resetVector := c.read16(0xFFFC)
-	c.PC = resetVector
+	c.PC = c.read16(0xFFFC)
 	c.Cycles = 0
+}
+
+// SoftReset models the user pressing the reset button: A,X,Y are
+// untouched, I is forced set, and S decrements by 3 (the reset
+// "pushes" 3 bytes but the writes are suppressed by the reset line —
+// the stack contents are preserved).
+func (c *CPU) SoftReset() {
+	c.SP -= 3
+	c.setFlag(FlagInterrupt, true)
+	c.PC = c.read16(0xFFFC)
 }
 
 // handleNMI handles Non-Maskable Interrupt

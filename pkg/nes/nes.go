@@ -66,13 +66,29 @@ func (n *NES) LoadCartridge(cart *cartridge.Cartridge) {
 	n.PPU.SetCartridge(cart)
 }
 
-// Reset resets the NES to initial state
+// Reset performs a power-on reset of the whole system. For the
+// reset-button path (CPU registers and RAM preserved) use SoftReset.
 func (n *NES) Reset() {
 	n.CPU.Reset()
 	n.PPU.Reset()
 	n.APU.Reset()
 	n.Cycles = 0
 	n.Frame = 0
+	n.nmiDelay = false
+	n.pendingNMI = false
+}
+
+// SoftReset models the reset button: only the CPU's I-flag and stack
+// pointer change (A,X,Y and RAM are preserved). PPU/APU still get a full
+// reset for a usable display/audio state — blargg's cpu_reset suite
+// only checks CPU state, so cycle-accurate partial PPU/APU reset isn't
+// needed here.
+func (n *NES) SoftReset() {
+	n.CPU.SoftReset()
+	n.PPU.Reset()
+	n.APU.Reset()
+	n.nmiDelay = false
+	n.pendingNMI = false
 }
 
 // Step executes one CPU cycle
