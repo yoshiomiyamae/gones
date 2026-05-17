@@ -109,22 +109,24 @@ func (a *APU) stepDMC() {
 	}
 }
 
-// stepDMCSample processes DMC sample data
+// stepDMCSample processes one DMC timer tick: emits a bit from the
+// output shift register, then refills it from the sample buffer when
+// the bit counter empties. The memory-reader half (DMA fetch into the
+// sample buffer) runs as a separate concern in front of the output
+// unit — see the NESdev "APU DMC" page for the canonical sequence.
 func (a *APU) stepDMCSample() {
-	// Fill sample buffer if empty and memory available
+	// === Memory reader: fill sample buffer if empty. ===
 	if a.DMC.BufferEmpty && a.DMC.CurrentLength > 0 && a.Memory != nil {
 		a.DMC.SampleBuffer = a.Memory.Read(a.DMC.CurrentAddress)
 		a.DMC.BufferEmpty = false
-		a.DMC.CurrentAddress++
-		if a.DMC.CurrentAddress > 0xFFFF {
-			a.DMC.CurrentAddress = 0x8000 // Wrap to ROM area
+		if a.DMC.CurrentAddress == 0xFFFF {
+			a.DMC.CurrentAddress = 0x8000
+		} else {
+			a.DMC.CurrentAddress++
 		}
 		a.DMC.CurrentLength--
-
-		// Check for end of sample
 		if a.DMC.CurrentLength == 0 {
 			if a.DMC.Loop {
-				// Restart sample
 				a.DMC.CurrentLength = a.DMC.SampleLength
 				a.DMC.CurrentAddress = a.DMC.SampleAddress
 			} else if a.DMC.IRQEnabled {
@@ -133,27 +135,30 @@ func (a *APU) stepDMCSample() {
 		}
 	}
 
-	// Process bits from buffer
+	// === Output unit: emit one bit (LSB-first), shift, decrement. ===
+	if a.DMC.BitsRemaining > 0 {
+		if !a.DMC.Silence {
+			if a.DMC.Buffer&1 != 0 {
+				if a.DMC.LoadCounter <= 125 {
+					a.DMC.LoadCounter += 2
+				}
+			} else if a.DMC.LoadCounter >= 2 {
+				a.DMC.LoadCounter -= 2
+			}
+		}
+		a.DMC.Buffer >>= 1
+		a.DMC.BitsRemaining--
+	}
+
+	// === New 8-bit cycle begins: reload shift register or go silent. ===
 	if a.DMC.BitsRemaining == 0 {
 		a.DMC.BitsRemaining = 8
-		if !a.DMC.BufferEmpty {
+		if a.DMC.BufferEmpty {
+			a.DMC.Silence = true
+		} else {
 			a.DMC.Buffer = a.DMC.SampleBuffer
 			a.DMC.BufferEmpty = true
 			a.DMC.Silence = false
-		} else {
-			a.DMC.Silence = true
-		}
-	}
-
-	if a.DMC.BitsRemaining > 0 && !a.DMC.Silence {
-		a.DMC.BitsRemaining--
-		bit := (a.DMC.Buffer >> a.DMC.BitsRemaining) & 1
-
-		// Update output counter
-		if bit == 1 && a.DMC.LoadCounter <= 125 {
-			a.DMC.LoadCounter += 2
-		} else if bit == 0 && a.DMC.LoadCounter >= 2 {
-			a.DMC.LoadCounter -= 2
 		}
 	}
 }
