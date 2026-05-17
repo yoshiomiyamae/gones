@@ -12,6 +12,20 @@ func modeExec(op func(c *CPU, mode AddressingMode) int, mode AddressingMode) fun
 	return func(c *CPU) int { return op(c, mode) }
 }
 
+// withDummyFetch wraps fn so it issues the cycle-2 dummy read at PC. The
+// 6502 does this for every implied / accumulator / stack opcode (the
+// pipelined fetch happens unconditionally even when the operand is
+// unused). On I/O space that read has side effects — blargg's
+// cpu_exec_space tests rely on it firing for RTS/RTI/BRK / etc. when
+// executing from $2000 / $4000. Applied at init() so the dispatch loop
+// itself stays branch-free.
+func withDummyFetch(fn func(*CPU) int) func(*CPU) int {
+	return func(c *CPU) int {
+		c.read(c.PC)
+		return fn(c)
+	}
+}
+
 func init() {
 	// LDA - A9/A5/B5/AD/BD/B9/A1/B1
 	opcodeTable[0xA9] = (*CPU).execLDAImmediate
@@ -324,6 +338,21 @@ func init() {
 	opcodeTable[0x77] = modeExec((*CPU).execRRA, AddrZeroPageX)
 	opcodeTable[0x63] = modeExec((*CPU).execRRA, AddrIndexedIndirect)
 	opcodeTable[0x73] = modeExec((*CPU).execRRA, AddrIndirectIndexed)
+
+	// Wrap implied / accumulator / stack opcodes with the cycle-2 dummy
+	// fetch at PC.
+	for _, op := range []uint8{
+		0x00, 0x40, 0x60, // BRK, RTI, RTS
+		0x08, 0x28, 0x48, 0x68, // PHP, PLP, PHA, PLA
+		0x0A, 0x2A, 0x4A, 0x6A, // ASL A, ROL A, LSR A, ROR A
+		0x18, 0x38, 0x58, 0x78, 0xB8, 0xD8, 0xF8, // Flag ops
+		0x88, 0x8A, 0x98, 0x9A, 0xA8, 0xAA, 0xBA, 0xC8, 0xCA, 0xE8, // Transfers/inc-dec
+		0xEA, 0x1A, 0x3A, 0x5A, 0x7A, 0xDA, 0xFA, // NOP + illegal one-byte NOPs
+	} {
+		if fn := opcodeTable[op]; fn != nil {
+			opcodeTable[op] = withDummyFetch(fn)
+		}
+	}
 }
 
 // executeInstruction dispatches one opcode through opcodeTable. Unmapped
@@ -893,8 +922,8 @@ func (c *CPU) execASLAccumulator() int {
 }
 
 func (c *CPU) execASL(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	c.setFlag(FlagCarry, value&0x80 != 0)
 	result := value << 1
@@ -912,8 +941,8 @@ func (c *CPU) execLSRAccumulator() int {
 }
 
 func (c *CPU) execLSR(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	c.setFlag(FlagCarry, value&0x01 != 0)
 	result := value >> 1
@@ -936,8 +965,8 @@ func (c *CPU) execROLAccumulator() int {
 }
 
 func (c *CPU) execROL(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	oldCarry := uint8(0)
 	if c.getFlag(FlagCarry) {
@@ -965,8 +994,8 @@ func (c *CPU) execRORAccumulator() int {
 }
 
 func (c *CPU) execROR(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	oldCarry := uint8(0)
 	if c.getFlag(FlagCarry) {
@@ -999,8 +1028,8 @@ func getShiftCycles(mode AddressingMode) int {
 
 // Increment/Decrement instructions
 func (c *CPU) execINC(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 	result := value + 1
 	c.setZN(result)
 	c.write(addr, result)
@@ -1008,8 +1037,8 @@ func (c *CPU) execINC(mode AddressingMode) int {
 }
 
 func (c *CPU) execDEC(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 	result := value - 1
 
 	c.setZN(result)

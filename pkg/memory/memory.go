@@ -61,6 +61,14 @@ type Memory struct {
 	// Hot path: keep the nil check ahead of the call to avoid the
 	// interface dispatch when no cheats are loaded.
 	Cheats CheatPatcher
+
+	// cpuBus is the most recent byte the CPU saw on its data bus. Reads
+	// from "non-driving" addresses (write-only APU ports, unallocated
+	// $4018-$401F, etc.) return this stale latched value instead of zero.
+	// blargg's cpu_exec_space_apu test runs code at $4000+ and depends on
+	// the open-bus value (the high byte of the preceding JMP) decoding as
+	// RTI; without proper tracking the CPU fetches $00=BRK and crashes.
+	cpuBus uint8
 }
 
 // New creates a new Memory instance
@@ -91,52 +99,60 @@ func (m *Memory) Read(addr uint16) uint8 {
 	return v
 }
 
-// read is the unpatched memory read — hot path, kept as small as possible.
+// read is the unpatched memory read. Every successful read latches into
+// cpuBus; addresses that don't drive the bus (write-only APU ports,
+// $4018-$401F, unmapped cartridge space) return the previous latched
+// value instead of zero.
 func (m *Memory) read(addr uint16) uint8 {
 	if addr < 0x2000 {
-		return m.RAM[addr&0x7FF]
+		v := m.RAM[addr&0x7FF]
+		m.cpuBus = v
+		return v
 	}
 
 	if addr >= 0x6000 {
 		if m.Cartridge != nil {
-			return m.Cartridge.ReadPRG(addr)
+			v := m.Cartridge.ReadPRG(addr)
+			m.cpuBus = v
+			return v
 		}
-		index := addr - 0x6000
-		if index >= 0xA000 {
-			return 0
-		}
-		return m.HighMem[index]
+		v := m.HighMem[addr-0x6000]
+		m.cpuBus = v
+		return v
 	}
 
 	if addr < 0x4000 {
 		if m.PPU != nil {
-			return m.PPU.ReadRegister(0x2000 + (addr & 0x7))
+			v := m.PPU.ReadRegister(0x2000 + (addr & 0x7))
+			m.cpuBus = v
+			return v
 		}
-		return 0
+		return m.cpuBus
+	}
+
+	if addr == 0x4015 {
+		if m.APU != nil {
+			v := m.APU.ReadRegister(addr)
+			m.cpuBus = v
+			return v
+		}
+		return m.cpuBus
 	}
 
 	if addr == 0x4016 {
+		// Bit 0 from controller; bits 1-7 are open bus on real hardware.
 		if m.Input != nil {
-			return m.Input.Read()
+			v := (m.cpuBus & 0xFE) | (m.Input.Read() & 0x01)
+			m.cpuBus = v
+			return v
 		}
-		return 0
+		return m.cpuBus
 	}
 
-	if addr == 0x4017 {
-		if m.APU != nil {
-			return m.APU.ReadRegister(addr)
-		}
-		return 0
-	}
-
-	if addr < 0x4020 {
-		if m.APU != nil {
-			return m.APU.ReadRegister(addr)
-		}
-		return 0
-	}
-
-	return 0
+	// $4000-$4014 are write-only APU ports, $4017 read is player-2 controller
+	// (not modelled yet), $4018-$401F is CPU-test/unallocated, $4020-$5FFF is
+	// cartridge expansion area. All return open bus.
+	return m.cpuBus
 }
 
 // oamDMAStallCycles is the cost an OAM DMA adds to the CPU on top of the
@@ -149,6 +165,7 @@ const oamDMAStallCycles = 513
 // count — non-zero only for OAM DMA at $4014. Other callers may safely
 // ignore the return.
 func (m *Memory) Write(addr uint16, value uint8) int {
+	m.cpuBus = value
 	switch {
 	case addr < 0x2000:
 		// CPU RAM (0x0000-0x1FFF, mirrored every 0x800 bytes)

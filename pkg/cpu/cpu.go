@@ -131,6 +131,17 @@ func (c *CPU) write(addr uint16, value uint8) {
 	c.extraCycles += c.Memory.Write(addr, value)
 }
 
+// rmwRead is the read-side of a read-modify-write instruction's bus
+// pattern: the CPU reads the byte, then issues a "dummy" write of that
+// same value at cycle 5 before writing the modified value at cycle 6.
+// On open-bus targets (PPU $2007, OAM $2004) the dummy write has user-
+// visible side effects — blargg's cpu_dummy_writes_ppumem relies on it.
+func (c *CPU) rmwRead(addr uint16) uint8 {
+	value := c.read(addr)
+	c.write(addr, value)
+	return value
+}
+
 func (c *CPU) read16(addr uint16) uint16 {
 	lo := uint16(c.read(addr))
 	hi := uint16(c.read(addr + 1))

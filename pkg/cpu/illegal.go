@@ -43,8 +43,8 @@ func (c *CPU) execSAX(mode AddressingMode) int {
 
 // DCP - Decrement and Compare
 func (c *CPU) execDCP(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 	value--
 	c.write(addr, value)
 
@@ -68,8 +68,8 @@ func (c *CPU) execDCP(mode AddressingMode) int {
 
 // ISB - Increment and Subtract with Borrow (also known as ISC)
 func (c *CPU) execISB(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 	value++
 	c.write(addr, value)
 
@@ -91,8 +91,8 @@ func (c *CPU) execISB(mode AddressingMode) int {
 
 // SLO - Shift Left and OR
 func (c *CPU) execSLO(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	// Shift left
 	c.setFlag(FlagCarry, value&0x80 != 0)
@@ -118,8 +118,8 @@ func (c *CPU) execSLO(mode AddressingMode) int {
 
 // RLA - Rotate Left and AND
 func (c *CPU) execRLA(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	// Rotate left through carry
 	newCarry := value&0x80 != 0
@@ -150,8 +150,8 @@ func (c *CPU) execRLA(mode AddressingMode) int {
 
 // SRE - Shift Right and EOR
 func (c *CPU) execSRE(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	// Shift right
 	c.setFlag(FlagCarry, value&0x01 != 0)
@@ -177,8 +177,8 @@ func (c *CPU) execSRE(mode AddressingMode) int {
 
 // RRA - Rotate Right and Add
 func (c *CPU) execRRA(mode AddressingMode) int {
-	addr, _ := c.getOperandAddress(mode)
-	value := c.read(addr)
+	addr := c.getWriteAddress(mode)
+	value := c.rmwRead(addr)
 
 	// Rotate right through carry
 	newCarry := value&0x01 != 0
