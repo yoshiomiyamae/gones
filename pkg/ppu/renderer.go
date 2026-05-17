@@ -144,12 +144,16 @@ func (p *PPU) renderBackgroundPixel(x, y int) uint32 {
 	return p.PaletteManager.GetBackgroundColor(tile.Attributes, colorIndex)
 }
 
-// fetchSpriteData fetches data for all sprites on current scanline
+// fetchSpriteData fetches data for all sprites on current scanline and
+// runs the next-scanline sprite-overflow evaluation that the PPU does
+// during cycles 65-256 of scanline N (i.e. for scanline N+1). The
+// next-scanline pass is what lets the overflow flag fire when 9+
+// sprites have Y=239 — those render at scanline 240 (post-render), so
+// the current-scanline count never sees them.
 func (p *PPU) fetchSpriteData(scanline int) []SpriteInfo {
 	var sprites []SpriteInfo
 	spriteHeight := 8
 
-	// Check sprite size
 	if p.PPUCTRL&PPUCTRLSpriteSize != 0 {
 		spriteHeight = 16
 	}
@@ -157,11 +161,16 @@ func (p *PPU) fetchSpriteData(scanline int) []SpriteInfo {
 	// Scan through OAM for sprites on this scanline.
 	// OAM Y stores (actual_screen_Y - 1) — a sprite with OAM Y = 143 first
 	// appears at scanline 144 — so we shift by +1 here and in renderSpritePixel.
+	// Secondary OAM holds 8 sprites; overflow fires when a 9th matches.
 	for i := 0; i < 64; i++ {
 		spriteY := int(p.OAM[i*4]) + 1
 
 		if scanline >= spriteY && scanline < spriteY+spriteHeight {
-			sprite := SpriteInfo{
+			if len(sprites) >= 8 {
+				p.PPUSTATUS |= PPUSTATUSSpriteOverflow
+				break
+			}
+			sprites = append(sprites, SpriteInfo{
 				SpriteData: SpriteData{
 					Y:          p.OAM[i*4],
 					TileIndex:  p.OAM[i*4+1],
@@ -169,13 +178,20 @@ func (p *PPU) fetchSpriteData(scanline int) []SpriteInfo {
 					X:          p.OAM[i*4+3],
 				},
 				OAMIndex: i,
-			}
-			sprites = append(sprites, sprite)
+			})
+		}
+	}
 
-			// NES can only render 8 sprites per scanline
-			if len(sprites) >= 8 {
-				// Set sprite overflow flag
-				p.PPUSTATUS |= 0x20
+	// Next-scanline overflow lookahead. Independent count — the real PPU's
+	// eval phase doesn't know about the render list.
+	next := scanline + 1
+	count := 0
+	for i := 0; i < 64; i++ {
+		spriteY := int(p.OAM[i*4]) + 1
+		if next >= spriteY && next < spriteY+spriteHeight {
+			count++
+			if count >= 9 {
+				p.PPUSTATUS |= PPUSTATUSSpriteOverflow
 				break
 			}
 		}

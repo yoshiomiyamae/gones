@@ -172,8 +172,9 @@ const (
 
 // PPUSTATUS flags
 const (
-	PPUSTATUSSprite0Hit = 0x40 // Sprite 0 hit
-	PPUSTATUSVBlank     = 0x80 // VBlank flag
+	PPUSTATUSSpriteOverflow = 0x20 // 9+ sprites on a scanline (eval-phase latched)
+	PPUSTATUSSprite0Hit     = 0x40 // Sprite 0 hit
+	PPUSTATUSVBlank         = 0x80 // VBlank flag
 )
 
 // Mirroring mode codes returned by Cartridge.GetMirroring() and mapper
@@ -329,7 +330,7 @@ func (p *PPU) Step() {
 			// breaks test 3's row-06 expectation.
 			p.PPUSTATUS &^= PPUSTATUSVBlank
 			p.PPUSTATUS &^= PPUSTATUSSprite0Hit
-			p.PPUSTATUS &^= 0x20 // sprite overflow
+			p.PPUSTATUS &^= PPUSTATUSSpriteOverflow
 
 			p.FrameComplete = true
 			p.handleFrameCompletion()

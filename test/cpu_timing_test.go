@@ -1,7 +1,6 @@
 package test
 
 import (
-	"bytes"
 	"os"
 	"testing"
 )
@@ -22,11 +21,10 @@ func TestCPUTimingTest6(t *testing.T) {
 	for i := 0; i < 1500; i++ {
 		sys.StepFrame()
 	}
-	nametable := sys.PPU.VRAM[0x2000:0x2400]
-	if bytes.Contains(nametable, []byte("FAIL OP")) {
+	if nametableContains(sys, "FAIL OP") {
 		t.Fatalf("test reported FAIL OP — see screenshot for the failing opcode and cycle count")
 	}
-	if !bytes.Contains(nametable, []byte("PASSED")) {
+	if !nametableContains(sys, "PASSED") {
 		t.Fatalf("test didn't report PASSED within 1500 frames — likely hung or failed silently")
 	}
 }

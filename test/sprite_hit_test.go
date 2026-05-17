@@ -1,7 +1,6 @@
 package test
 
 import (
-	"bytes"
 	"os"
 	"testing"
 )
@@ -20,11 +19,10 @@ func TestSpriteHitRightEdge(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		sys.StepFrame()
 	}
-	nametable := sys.PPU.VRAM[0x2000:0x2400]
-	if bytes.Contains(nametable, []byte("FAILED")) {
+	if nametableContains(sys, "FAILED") {
 		t.Fatalf("06.right_edge reported FAILED — see screenshot for the failing subtest")
 	}
-	if !bytes.Contains(nametable, []byte("PASSED")) {
+	if !nametableContains(sys, "PASSED") {
 		t.Fatalf("06.right_edge didn't reach PASSED within 300 frames — likely hung")
 	}
 }

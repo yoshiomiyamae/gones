@@ -1,7 +1,6 @@
 package test
 
 import (
-	"bytes"
 	"os"
 	"testing"
 )
@@ -31,12 +30,11 @@ func TestDMCDMADuringRead4_4016(t *testing.T) {
 	for i := 0; i < 600; i++ {
 		sys.StepFrame()
 	}
-	nametable := sys.PPU.VRAM[0x2000:0x2400]
-	if bytes.Contains(nametable, []byte("Passed")) {
+	if nametableContains(sys, "Passed") {
 		t.Log("dma_4016_read unexpectedly passed — DMC DMA stall behaviour can now be promoted")
 		return
 	}
-	if !bytes.Contains(nametable, []byte("Failed")) {
+	if !nametableContains(sys, "Failed") {
 		t.Fatalf("dma_4016_read produced neither Passed nor Failed text — emulator likely hung")
 	}
 	t.Skip("known limitation: DMC DMA + $4016 controller-read glitch requires cycle-accurate DMA stall (whole-instruction stepping can't model it)")
