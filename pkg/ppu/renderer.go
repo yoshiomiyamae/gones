@@ -321,8 +321,13 @@ func (p *PPU) renderPixel() {
 			finalColor = bgColor
 		}
 
-		// Optimized sprite 0 hit detection
-		if sprite0Hit && p.PPUSTATUS&PPUSTATUSSprite0Hit == 0 {
+		// Optimized sprite 0 hit detection.
+		//
+		// NESdev: sprite 0 hit never fires at x=255 (the PPU's output
+		// pipeline rules out that final dot for an "obscure" pixel-
+		// output-circuitry reason). blargg's right_edge test exercises
+		// it directly.
+		if sprite0Hit && p.PPUSTATUS&PPUSTATUSSprite0Hit == 0 && x != 255 {
 			bgOpaque := p.isBackgroundPixelOpaque(x, y)
 			spriteEnabled := p.PPUMASK&PPUMASKSpriteShow != 0
 			bgEnabled := p.PPUMASK&PPUMASKBGShow != 0
