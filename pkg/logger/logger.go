@@ -83,22 +83,38 @@ func SetMapperLogging(enabled bool) {
 	}
 }
 
-// LogCPU logs CPU instruction execution (disabled for performance)
+// CPUEnabled reports whether LogCPU would actually emit. Guard hot-path
+// LogCPU sites with this so their arguments aren't boxed into []interface{}
+// (a heap allocation that happens at the call site even when logging is off).
+func CPUEnabled() bool {
+	return globalLogger != nil && globalLogger.cpuEnabled && globalLogger.level >= LogLevelDebug
+}
+
+// PPUEnabled reports whether LogPPU would actually emit. See CPUEnabled for
+// why hot-path callers must guard with this.
+func PPUEnabled() bool {
+	return globalLogger != nil && globalLogger.ppuEnabled && globalLogger.level >= LogLevelTrace
+}
+
+// LogCPU logs CPU instruction execution (disabled for performance). Gate
+// reused by CPUEnabled so hot-path call-site guards can't drift from it.
 func LogCPU(format string, args ...interface{}) {
-	if globalLogger != nil && globalLogger.cpuEnabled && globalLogger.level >= LogLevelDebug {
-		timestamp := time.Now().Format("15:04:05.000")
-		message := fmt.Sprintf(format, args...)
-		fmt.Fprintf(globalLogger.writer, "[%s] CPU: %s\n", timestamp, message)
+	if !CPUEnabled() {
+		return
 	}
+	timestamp := time.Now().Format("15:04:05.000")
+	message := fmt.Sprintf(format, args...)
+	fmt.Fprintf(globalLogger.writer, "[%s] CPU: %s\n", timestamp, message)
 }
 
 // LogPPU logs PPU operations
 func LogPPU(format string, args ...interface{}) {
-	if globalLogger != nil && globalLogger.ppuEnabled && globalLogger.level >= LogLevelTrace {
-		timestamp := time.Now().Format("15:04:05.000")
-		message := fmt.Sprintf(format, args...)
-		fmt.Fprintf(globalLogger.writer, "[%s] PPU: %s\n", timestamp, message)
+	if !PPUEnabled() {
+		return
 	}
+	timestamp := time.Now().Format("15:04:05.000")
+	message := fmt.Sprintf(format, args...)
+	fmt.Fprintf(globalLogger.writer, "[%s] PPU: %s\n", timestamp, message)
 }
 
 // LogAPU logs APU operations

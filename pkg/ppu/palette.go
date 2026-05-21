@@ -40,6 +40,15 @@ type PaletteManager struct {
 
 	// Emphasis bits for color modification
 	Emphasis uint8 // bits 5-7 of PPUMASK
+
+	// bgColorCache / sprColorCache hold the final ARGB color for every
+	// (palette<<2 | colorIndex) pair, with palette-mirroring, the
+	// colorIndex-0 backdrop/transparent rule, and emphasis already folded in.
+	// GetBackgroundColor / GetSpriteColor are called once per pixel, so this
+	// turns that hot path into a single array index. Rebuilt by
+	// rebuildColorCache whenever palette RAM or emphasis changes (rare).
+	bgColorCache  [16]uint32
+	sprColorCache [16]uint32
 }
 
 // NewPaletteManager creates a new palette manager
@@ -62,6 +71,7 @@ func NewPaletteManager() *PaletteManager {
 	pm.PaletteRAM[3] = 0x00 // Dark gray
 
 	logger.LogPPU("PaletteManager initialized with debugging colors")
+	pm.rebuildColorCache()
 	return pm
 }
 
@@ -90,7 +100,9 @@ func (pm *PaletteManager) ReadPalette(addr uint8) uint8 {
 func (pm *PaletteManager) WritePalette(addr uint8, value uint8) {
 	addr = addr & 0x1F // Ensure within palette range
 
-	logger.LogPPU("WritePalette: original addr=$%02X, value=$%02X", addr, value)
+	if logger.PPUEnabled() {
+		logger.LogPPU("WritePalette: original addr=$%02X, value=$%02X", addr, value)
+	}
 
 	// Handle mirroring of backdrop colors
 	// $10, $14, $18, $1C mirror to $00, $04, $08, $0C respectively
@@ -104,52 +116,51 @@ func (pm *PaletteManager) WritePalette(addr uint8, value uint8) {
 		addr = 0x0C
 	}
 
-	logger.LogPPU("WritePalette: final addr=$%02X, value=$%02X", addr, value)
+	if logger.PPUEnabled() {
+		logger.LogPPU("WritePalette: final addr=$%02X, value=$%02X", addr, value)
+	}
 	pm.PaletteRAM[addr] = value & 0x3F // Only 6 bits used
+	pm.rebuildColorCache()
 }
 
-// GetBackgroundColor gets a background palette color
+// rebuildColorCache recomputes bgColorCache / sprColorCache from the current
+// palette RAM and emphasis. Folds in the colorIndex-0 rule (BG color 0 of
+// every palette is the universal backdrop; sprite color 0 is transparent) and
+// the $10/$14/$18/$1C backdrop mirroring done by ReadPalette. Cheap (32
+// entries) and only called when palette RAM or emphasis changes.
+func (pm *PaletteManager) rebuildColorCache() {
+	for pal := uint8(0); pal < 4; pal++ {
+		for ci := uint8(0); ci < 4; ci++ {
+			i := pal*4 + ci
+			if ci == 0 {
+				// Background color 0 = universal backdrop ($3F00).
+				pm.bgColorCache[i] = pm.getARGBColor(pm.ReadPalette(0))
+				// Sprite color 0 = transparent.
+				pm.sprColorCache[i] = 0x00000000
+				continue
+			}
+			pm.bgColorCache[i] = pm.getARGBColor(pm.ReadPalette(i))
+			pm.sprColorCache[i] = pm.getARGBColor(pm.ReadPalette(0x10 + i))
+		}
+	}
+}
+
+// GetBackgroundColor returns the ARGB color for a background pixel via the
+// precomputed cache (palette/colorIndex each 0-3).
 func (pm *PaletteManager) GetBackgroundColor(palette uint8, colorIndex uint8) uint32 {
 	if palette > 3 || colorIndex > 3 {
 		return 0xFF000000 // Black
 	}
-
-	// Calculate palette RAM address
-	addr := palette*4 + colorIndex
-
-	// Color 0 of each palette is the universal backdrop color
-	if colorIndex == 0 {
-		addr = 0
-	}
-
-	paletteValue := pm.ReadPalette(addr)
-	color := pm.getARGBColor(paletteValue)
-
-	// Debug: Log background color conversion
-	if palette == 0 && (colorIndex == 1 || colorIndex == 3) {
-		logger.LogPPU("GetBGColor: palette=%d, colorIndex=%d, addr=%02X, paletteVal=%02X, color=%08X",
-			palette, colorIndex, addr, paletteValue, color)
-	}
-
-	return color
+	return pm.bgColorCache[palette*4+colorIndex]
 }
 
-// GetSpriteColor gets a sprite palette color
+// GetSpriteColor returns the ARGB color for a sprite pixel via the precomputed
+// cache; color 0 reads back as transparent (alpha 0).
 func (pm *PaletteManager) GetSpriteColor(palette uint8, colorIndex uint8) uint32 {
 	if palette > 3 || colorIndex > 3 {
 		return 0x00000000 // Transparent
 	}
-
-	// Color 0 is transparent for sprites
-	if colorIndex == 0 {
-		return 0x00000000
-	}
-
-	// Calculate palette RAM address (sprite palettes start at 0x10)
-	addr := 0x10 + palette*4 + colorIndex
-
-	paletteValue := pm.ReadPalette(addr)
-	return pm.getARGBColor(paletteValue)
+	return pm.sprColorCache[palette*4+colorIndex]
 }
 
 // argbLUT[emphasis>>5][paletteIndex&0x3F] holds the precomputed ARGB
@@ -183,9 +194,15 @@ func (pm *PaletteManager) getARGBColor(paletteIndex uint8) uint32 {
 	return argbLUT[pm.Emphasis>>5][paletteIndex&0x3F]
 }
 
-// SetEmphasis sets the color emphasis bits
+// SetEmphasis sets the color emphasis bits and refreshes the color cache,
+// since emphasis changes the ARGB value of every palette entry.
 func (pm *PaletteManager) SetEmphasis(emphasis uint8) {
-	pm.Emphasis = emphasis & 0xE0 // Only bits 5-7
+	e := emphasis & 0xE0 // Only bits 5-7
+	if e == pm.Emphasis {
+		return
+	}
+	pm.Emphasis = e
+	pm.rebuildColorCache()
 }
 
 // GetPaletteDebugInfo returns debug information about current palettes

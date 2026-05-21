@@ -131,10 +131,15 @@ func (n *NES) Step() {
 
 	for i := 0; i < cpuCycles*3; i++ {
 		n.PPU.Step()
+	}
 
-		if n.PPU.ConsumeNMI() {
-			n.nmiDelay = true
-		}
+	// The PPU asserts NMIRequested at most once per frame (the VBL-set
+	// transition), and nmiDelay only needs to be true by the end of this
+	// nes.Step for the pipeline above to advance it next instruction — so a
+	// single post-loop consume is equivalent to checking every PPU cycle, at
+	// ~1/20th the calls.
+	if n.PPU.ConsumeNMI() {
+		n.nmiDelay = true
 	}
 
 	for i := 0; i < cpuCycles; i++ {

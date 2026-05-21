@@ -188,6 +188,9 @@ func (a *APU) initializeChannels() {
 	// Initialize DMC
 	a.DMC.BufferEmpty = true
 	a.DMC.LoadCounter = 0
+	// Start the rate counter at a full period so the sample unit doesn't
+	// clock on the very first cycle.
+	a.DMC.Timer = dmcRates[a.DMC.Rate&0x0F] - 1
 }
 
 // Helper function to get frequency from timer value

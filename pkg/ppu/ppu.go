@@ -109,7 +109,7 @@ type PPU struct {
 
 	// currentBGTile holds the most-recently-fetched background tile for
 	// the visible scanline; currentBGTileX is its index (-1 = invalid).
-	// renderBackgroundPixel re-fetches when crossing an 8-pixel tile
+	// bgTileAt re-fetches when crossing an 8-pixel tile
 	// boundary, so a mid-scanline $2000 D4 toggle (pattern table) or a
 	// $2005/$2006 update affects subsequent tiles within the same
 	// scanline — required by Quietust's scanline test. v.coarseX / fineX
@@ -119,9 +119,14 @@ type PPU struct {
 	currentBGTile  BackgroundTile
 	currentBGTileX int
 
-	// Rendering
-	PaletteManager *PaletteManager
-	currentSprites []SpriteInfo
+	// Rendering. currentSprites holds the sprites overlapping the current
+	// scanline (max 8), evaluated once at cycle 0; currentSpriteCount is how
+	// many are valid. Each entry carries its pre-fetched pattern row bytes so
+	// per-pixel sprite rendering needs no CHR fetch. Fixed-size array to avoid
+	// a per-scanline heap allocation.
+	PaletteManager     *PaletteManager
+	currentSprites     [8]SpriteInfo
+	currentSpriteCount int
 
 	// PPU read buffer for $2007 reads
 	readBuffer uint8
@@ -222,6 +227,11 @@ func (p *PPU) Reset() {
 	p.Scanline = 0
 	p.FrameComplete = false
 	p.currentBGTileX = -1
+	// PPUMASK was just cleared; keep the palette emphasis in sync with it
+	// (emphasis is only updated on $2001 writes, not derived per-cycle).
+	if p.PaletteManager != nil {
+		p.PaletteManager.SetEmphasis(0)
+	}
 
 	// Initialize persistent buffer with background color to indicate "no content yet"
 	// Don't reset persistent buffer on Reset to preserve accumulated content
@@ -261,9 +271,6 @@ func (p *PPU) Step() {
 			p.NMIRequested = true
 		}
 	}
-
-	// Update emphasis for palette manager
-	p.PaletteManager.SetEmphasis(p.PPUMASK & 0xE0)
 
 	// Render visible scanlines
 	if p.Scanline >= 0 && p.Scanline < 240 {
@@ -429,17 +436,14 @@ func (p *PPU) readVRAMInternal(addr uint16, sprite bool) uint8 {
 				value = p.Cartridge.ReadCHR(addr)
 			}
 			// Debug: Log CHR reads via PPU - focus on pattern table reads with scanline info
-			if addr <= 0x1FFF && (addr < 0x100 || (addr >= 0x800 && addr < 0x900)) {
+			if logger.PPUEnabled() && addr <= 0x1FFF && (addr < 0x100 || (addr >= 0x800 && addr < 0x900)) {
 				// Log first 256 bytes of each bank for key areas
+				table := "BG"
+				if addr >= 0x1000 {
+					table = "SPR"
+				}
 				logger.LogPPU("PPU CHR Read: scanline=%d, cycle=%d, addr=$%04X, value=$%02X, table=%s",
-					p.Scanline, p.Cycle, addr, value,
-					func() string {
-						if addr < 0x1000 {
-							return "BG"
-						} else {
-							return "SPR"
-						}
-					}())
+					p.Scanline, p.Cycle, addr, value, table)
 			}
 			return value
 		}
@@ -472,7 +476,7 @@ func (p *PPU) writeVRAM(addr uint16, value uint8) {
 		// Pattern table (CHR)
 		if p.Cartridge != nil {
 			// Debug: Log CHR writes via PPU for first bytes
-			if addr <= 0x000F {
+			if logger.PPUEnabled() && addr <= 0x000F {
 				logger.LogPPU("PPU CHR Write: addr=$%04X, value=$%02X", addr, value)
 			}
 			p.Cartridge.WriteCHR(addr, value)
@@ -762,6 +766,9 @@ func (p *PPU) LoadState(r io.Reader) error {
 	if p.PaletteManager != nil {
 		p.PaletteManager.PaletteRAM = s.PaletteRAM
 		p.PaletteManager.Emphasis = s.PaletteEmphasis
+		// PaletteRAM/Emphasis were set by direct field assignment (bypassing
+		// WritePalette/SetEmphasis), so refresh the derived color cache.
+		p.PaletteManager.rebuildColorCache()
 	}
 	p.invalidateRenderCache()
 	return nil
@@ -772,7 +779,7 @@ func (p *PPU) LoadState(r io.Reader) error {
 // pixel fetch re-reads from the freshly loaded state.
 func (p *PPU) invalidateRenderCache() {
 	p.currentBGTileX = -1
-	p.currentSprites = nil
+	p.currentSpriteCount = 0
 }
 
 // GetDisplayFrameBuffer returns the frame buffer that should be displayed

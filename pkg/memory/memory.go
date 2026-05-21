@@ -189,7 +189,7 @@ func (m *Memory) Write(addr uint16, value uint8) int {
 		// PPU registers (0x2000-0x3FFF, mirrored every 8 bytes)
 		if m.PPU != nil {
 			ppuAddr := 0x2000 + (addr & 0x7)
-			if ppuAddr == 0x2006 || ppuAddr == 0x2007 {
+			if logger.CPUEnabled() && (ppuAddr == 0x2006 || ppuAddr == 0x2007) {
 				logger.LogCPU("Memory Write PPU $%04X: value=$%02X", ppuAddr, value)
 			}
 			m.PPU.WriteRegister(ppuAddr, value)

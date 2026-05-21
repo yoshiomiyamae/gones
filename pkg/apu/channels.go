@@ -99,8 +99,10 @@ func (a *APU) stepDMC() {
 	if !a.DMC.Enabled {
 		return
 	}
-	dmcPeriod := dmcRates[a.DMC.Rate&0x0F]
-	if a.Cycles%uint64(dmcPeriod) == 0 {
+	// reload = period-1 clocks the sample unit once every `period` CPU
+	// cycles; a $4010 rate change takes effect at the next reload, as on
+	// hardware (the in-flight count finishes first).
+	if tickTimer(&a.DMC.Timer, dmcRates[a.DMC.Rate&0x0F]-1) {
 		a.stepDMCSample()
 	}
 }

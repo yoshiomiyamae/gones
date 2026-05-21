@@ -27,7 +27,9 @@ func (p *PPU) ReadRegister(addr uint16) uint8 {
 			p.vblSuppressed = true
 		}
 		statusBits := p.PPUSTATUS & 0xE0
-		logger.LogPPU("Read PPUSTATUS: $%02X", statusBits)
+		if logger.PPUEnabled() {
+			logger.LogPPU("Read PPUSTATUS: $%02X", statusBits)
+		}
 		p.refreshOpenBus(statusBits, 0xE0)
 		p.PPUSTATUS &^= PPUSTATUSVBlank
 		p.w = 0
@@ -60,7 +62,7 @@ func (p *PPU) ReadRegister(addr uint16) uint8 {
 			p.readBuffer = p.readVRAM(readAddr)
 		}
 
-		if p.v <= 0x000F {
+		if logger.PPUEnabled() && p.v <= 0x000F {
 			logger.LogPPU("$2007 Read CHR: vramAddr=$%04X, value=$%02X, buffer=$%02X", p.v, value, p.readBuffer)
 		}
 
@@ -91,10 +93,12 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 		oldValue := p.PPUCTRL
 		p.PPUCTRL = value
 		p.t = (p.t & 0xF3FF) | ((uint16(value) & 0x03) << 10)
-		logger.LogPPU("Write PPUCTRL: $%02X -> $%02X (NMI=%v, BG_table=$%04X, Sprite_table=$%04X)",
-			oldValue, value, (value&PPUCTRLNMIEnable) != 0,
-			uint16(0x1000)*uint16((value&PPUCTRLBGTable)>>4),
-			uint16(0x1000)*uint16((value&PPUCTRLSpriteTable)>>3))
+		if logger.PPUEnabled() {
+			logger.LogPPU("Write PPUCTRL: $%02X -> $%02X (NMI=%v, BG_table=$%04X, Sprite_table=$%04X)",
+				oldValue, value, (value&PPUCTRLNMIEnable) != 0,
+				uint16(0x1000)*uint16((value&PPUCTRLBGTable)>>4),
+				uint16(0x1000)*uint16((value&PPUCTRLSpriteTable)>>3))
+		}
 		// Immediate NMI: enabling NMI (bit 7 transition 0→1) while VBL is
 		// set fires an NMI right away; pendingNMI defers one instruction
 		// per nmi_control test 11 "after NEXT instruction". Re-writing $80
@@ -111,9 +115,14 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 		}
 	case 0x2001: // PPUMASK
 		oldValue := p.PPUMASK
-		logger.LogPPU("Write PPUMASK: $%02X -> $%02X (BGShow=%v, SpriteShow=%v, Greyscale=%v)",
-			oldValue, value, (value&PPUMASKBGShow) != 0, (value&PPUMASKSpriteShow) != 0, (value&PPUMASKGreyscale) != 0)
+		if logger.PPUEnabled() {
+			logger.LogPPU("Write PPUMASK: $%02X -> $%02X (BGShow=%v, SpriteShow=%v, Greyscale=%v)",
+				oldValue, value, (value&PPUMASKBGShow) != 0, (value&PPUMASKSpriteShow) != 0, (value&PPUMASKGreyscale) != 0)
+		}
 		p.PPUMASK = value
+		// Emphasis (PPUMASK bits 5-7) feeds the palette ARGB LUT index. Set
+		// it here on the write instead of re-deriving it every PPU cycle.
+		p.PaletteManager.SetEmphasis(value & 0xE0)
 		// Render off→on transition: arm the MMC3 "first A12 rise after long
 		// pause" one-shot so the next rendering scanline's cycle-5 BG fetch
 		// (in BG=$1000 mode) clocks the IRQ counter once before the normal
@@ -128,46 +137,60 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 		p.OAM[p.OAMADDR] = value
 		p.OAMADDR++
 	case 0x2005: // PPUSCROLL
-		logger.LogPPU("Write PPUSCROLL: value=$%02X, w=%d, scanline=%d", value, p.w, p.Scanline)
+		if logger.PPUEnabled() {
+			logger.LogPPU("Write PPUSCROLL: value=$%02X, w=%d, scanline=%d", value, p.w, p.Scanline)
+		}
 		if p.w == 0 {
 			p.t = (p.t & 0xFFE0) | (uint16(value) >> 3)
 			p.xTemp = value & 0x07 // Store in temporary register
 			p.w = 1
-			logger.LogPPU("PPUSCROLL X: value=$%02X, xTemp=%d, t=$%04X, scanline=%d", value, p.xTemp, p.t, p.Scanline)
+			if logger.PPUEnabled() {
+				logger.LogPPU("PPUSCROLL X: value=$%02X, xTemp=%d, t=$%04X, scanline=%d", value, p.xTemp, p.t, p.Scanline)
+			}
 		} else {
 			p.t = (p.t & 0x8FFF) | ((uint16(value) & 0x07) << 12)
 			p.t = (p.t & 0xFC1F) | ((uint16(value) & 0xF8) << 2)
 			p.w = 0
-			logger.LogPPU("PPUSCROLL Y: value=$%02X, t=$%04X, scanline=%d", value, p.t, p.Scanline)
+			if logger.PPUEnabled() {
+				logger.LogPPU("PPUSCROLL Y: value=$%02X, t=$%04X, scanline=%d", value, p.t, p.Scanline)
+			}
 		}
 	case 0x2006: // PPUADDR
-		logger.LogPPU("PPU Write $2006: value=$%02X, w=%d", value, p.w)
+		if logger.PPUEnabled() {
+			logger.LogPPU("PPU Write $2006: value=$%02X, w=%d", value, p.w)
+		}
 		if p.w == 0 {
 			p.t = (p.t & 0x80FF) | ((uint16(value) & 0x3F) << 8)
 			p.w = 1
-			logger.LogPPU("Write PPUADDR (high): $%02X, t=$%04X", value, p.t)
-			// Debug: Check if will point to CHR area
-			if (p.t & 0xFF00) < 0x2000 {
-				logger.LogPPU("PPUADDR high set for CHR area: $%04X", p.t)
+			if logger.PPUEnabled() {
+				logger.LogPPU("Write PPUADDR (high): $%02X, t=$%04X", value, p.t)
+				// Debug: Check if will point to CHR area
+				if (p.t & 0xFF00) < 0x2000 {
+					logger.LogPPU("PPUADDR high set for CHR area: $%04X", p.t)
+				}
 			}
 		} else {
 			p.t = (p.t & 0xFF00) | uint16(value)
 			p.v = p.t
 			p.w = 0
-			logger.LogPPU("Write PPUADDR (low): $%02X, v=$%04X", value, p.v)
-			// Debug: Check if pointing to CHR area
-			if p.v < 0x2000 {
-				logger.LogPPU("PPUADDR set to CHR area: $%04X", p.v)
+			if logger.PPUEnabled() {
+				logger.LogPPU("Write PPUADDR (low): $%02X, v=$%04X", value, p.v)
+				// Debug: Check if pointing to CHR area
+				if p.v < 0x2000 {
+					logger.LogPPU("PPUADDR set to CHR area: $%04X", p.v)
+				}
 			}
 			// The second $2006 write commits t into v, which can flip A12
 			// (bit 12) — MMC3 IRQ counter clocks on A12 0→1.
 			p.notifyCartridgeA12()
 		}
 	case 0x2007: // PPUDATA
-		logger.LogPPU("PPU Write $2007: vramAddr=$%04X, value=$%02X", p.v, value)
-		// Debug: Enhanced logging for CHR area writes
-		if p.v <= 0x000F {
-			logger.LogPPU("$2007 Write CHR: vramAddr=$%04X, value=$%02X", p.v, value)
+		if logger.PPUEnabled() {
+			logger.LogPPU("PPU Write $2007: vramAddr=$%04X, value=$%02X", p.v, value)
+			// Debug: Enhanced logging for CHR area writes
+			if p.v <= 0x000F {
+				logger.LogPPU("$2007 Write CHR: vramAddr=$%04X, value=$%02X", p.v, value)
+			}
 		}
 		p.writeVRAM(p.v, value)
 		p.incrementVRAMAddress()

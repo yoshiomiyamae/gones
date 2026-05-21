@@ -175,6 +175,9 @@ type DMCChannel struct {
 	Buffer         uint8
 	ShiftReg       uint8
 	BitsRemaining  uint8
+	// Timer is the rate down-counter: it decrements each CPU cycle and
+	// clocks the sample unit on underflow, reloading from dmcRates[Rate].
+	Timer          uint16
 	Silence        bool
 	SampleBuffer   uint8
 	BufferEmpty    bool
