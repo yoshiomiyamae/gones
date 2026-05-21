@@ -300,5 +300,12 @@ func (n *NES) LoadState(r io.Reader) error {
 	}
 	n.pendingNMI = flags&1 != 0
 	n.nmiDelay = flags&2 != 0
+	// Sprite size is a PPUCTRL-derived hint the cartridge layer caches
+	// (MMC5 uses it to route BG vs sprite CHR fetches). PPU.LoadState
+	// restores PPUCTRL but doesn't fire the $2000 write hook, so re-push
+	// the bit through the same channel the live $2000 path uses.
+	if n.Cartridge != nil {
+		n.Cartridge.SetSpriteSize(n.PPU.PPUCTRL&ppu.PPUCTRLSpriteSize != 0)
+	}
 	return nil
 }

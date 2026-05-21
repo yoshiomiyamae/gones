@@ -121,7 +121,8 @@ func TestMapperSelection(t *testing.T) {
 		{0x20, 0x00, 2, false}, // Mapper 2
 		{0x30, 0x00, 3, false}, // Mapper 3
 		{0x40, 0x00, 4, false}, // Mapper 4
-		{0x50, 0x00, 5, true},  // Mapper 5 (unsupported)
+		{0x50, 0x00, 5, false}, // Mapper 5
+		{0x60, 0x00, 6, true},  // Mapper 6 (unsupported)
 	}
 
 	for _, tc := range testCases {

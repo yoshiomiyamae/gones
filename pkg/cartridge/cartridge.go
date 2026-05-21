@@ -32,6 +32,26 @@ type Cartridge struct {
 	// (FME-7 expansion sound, etc.); the APU's mixer pulls per sample.
 	audioSource mapper.AudioSource
 
+	// hasExpansion is true when the mapper decodes the $4020-$5FFF
+	// expansion-area window (MMC5). Memory uses this to decide
+	// whether to route CPU R/W there to the mapper or leave open bus.
+	hasExpansion bool
+
+	// spriteCHRReader caches the optional mapper.SpriteCHRReader
+	// assertion. When set, sprite pattern fetches route here instead
+	// of through ReadCHR — used by MMC5's dual CHR set in 8×16 mode.
+	spriteCHRReader mapper.SpriteCHRReader
+
+	// spriteSizeHinter caches the optional mapper.SpriteSizeHinter so
+	// PPU $2000 writes can tell the mapper whether 8×16 mode is on.
+	spriteSizeHinter mapper.SpriteSizeHinter
+
+	// scanlineNotifier caches the optional mapper.ScanlineNotifier
+	// so the PPU can hand MMC5 explicit per-scanline ticks (A12
+	// edges don't fire on games whose BG and sprites share a
+	// pattern table).
+	scanlineNotifier mapper.ScanlineNotifier
+
 	// Mirroring
 	Mirroring MirroringMode
 }
@@ -148,8 +168,50 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 	if s, ok := cart.Mapper.(mapper.AudioSource); ok {
 		cart.audioSource = s
 	}
+	if _, ok := cart.Mapper.(mapper.ExpansionDecoder); ok {
+		cart.hasExpansion = true
+	}
+	if r, ok := cart.Mapper.(mapper.SpriteCHRReader); ok {
+		cart.spriteCHRReader = r
+	}
+	if h, ok := cart.Mapper.(mapper.SpriteSizeHinter); ok {
+		cart.spriteSizeHinter = h
+	}
+	if n, ok := cart.Mapper.(mapper.ScanlineNotifier); ok {
+		cart.scanlineNotifier = n
+	}
 
 	return cart, nil
+}
+
+// HasExpansion reports whether the mapper decodes the $4020-$5FFF
+// cartridge-expansion window.
+func (c *Cartridge) HasExpansion() bool { return c.hasExpansion }
+
+// ReadCHRSprite routes sprite pattern fetches through the mapper's
+// sprite-specific CHR path when available (MMC5 8×16 mode), falling
+// back to the unified ReadCHR for every other mapper.
+func (c *Cartridge) ReadCHRSprite(addr uint16) uint8 {
+	if c.spriteCHRReader != nil {
+		return c.spriteCHRReader.ReadCHRSprite(addr)
+	}
+	return c.ReadCHR(addr)
+}
+
+// SetSpriteSize forwards PPU $2000 bit-5 writes to mappers that
+// distinguish BG vs sprite CHR routing by sprite size.
+func (c *Cartridge) SetSpriteSize(is8x16 bool) {
+	if c.spriteSizeHinter != nil {
+		c.spriteSizeHinter.SetSpriteSize(is8x16)
+	}
+}
+
+// NotifyScanline tells the mapper that the PPU has just started a new
+// rendering scanline. Used by MMC5 to drive its scanline-match IRQ.
+func (c *Cartridge) NotifyScanline(scanline int, renderingEnabled bool) {
+	if c.scanlineNotifier != nil {
+		c.scanlineNotifier.NotifyScanline(scanline, renderingEnabled)
+	}
 }
 
 // readHeader reads the iNES header

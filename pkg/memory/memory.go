@@ -21,11 +21,12 @@ type APUBus interface {
 }
 
 // CartridgeBus is the subset of the cartridge that the memory bus needs:
-// PRG read/write at $6000-$FFFF. CHR access goes through the PPU, not
-// here.
+// PRG read/write at $6000-$FFFF (plus $4020-$5FFF for mappers that
+// HaveExpansion). CHR access goes through the PPU, not here.
 type CartridgeBus interface {
 	ReadPRG(addr uint16) uint8
 	WritePRG(addr uint16, value uint8)
+	HasExpansion() bool
 }
 
 // InputBus is the subset of the controller used by the memory bus:
@@ -150,8 +151,21 @@ func (m *Memory) read(addr uint16) uint8 {
 	}
 
 	// $4000-$4014 are write-only APU ports, $4017 read is player-2 controller
-	// (not modelled yet), $4018-$401F is CPU-test/unallocated, $4020-$5FFF is
-	// cartridge expansion area. All return open bus.
+	// (not modelled yet), $4018-$401F is CPU-test/unallocated.
+	if addr < 0x4020 {
+		return m.cpuBus
+	}
+
+	// $4020-$5FFF is cartridge expansion. Only mappers that opt in
+	// (mapper.ExpansionDecoder — currently MMC5) decode this range;
+	// everything else leaves it as open bus so the cpu_exec_space
+	// test ROM can keep relying on $40xx latching for its
+	// JMP-into-APU-space round-trip.
+	if m.Cartridge != nil && m.Cartridge.HasExpansion() {
+		v := m.Cartridge.ReadPRG(addr)
+		m.cpuBus = v
+		return v
+	}
 	return m.cpuBus
 }
 
@@ -193,6 +207,13 @@ func (m *Memory) Write(addr uint16, value uint8) int {
 	case addr < 0x4020:
 		if m.APU != nil {
 			m.APU.WriteRegister(addr, value)
+		}
+	case addr < 0x6000:
+		// Cartridge expansion ($4020-$5FFF). Only opt-in mappers (MMC5)
+		// receive these writes; for everything else the write is a
+		// no-op and the bus latch above stands.
+		if m.Cartridge != nil && m.Cartridge.HasExpansion() {
+			m.Cartridge.WritePRG(addr, value)
 		}
 	case addr >= 0x6000:
 		if m.Cartridge != nil {

@@ -51,6 +51,40 @@ type AudioSource interface {
 	AudioSample() float32
 }
 
+// ExpansionDecoder is a marker interface implemented by mappers that
+// decode the $4020-$5FFF cartridge-expansion address range (currently
+// only MMC5 — registers, multiplier, ExRAM). When the mapper doesn't
+// claim it, Memory leaves the read as open bus and ignores writes.
+type ExpansionDecoder interface {
+	DecodesExpansion()
+}
+
+// SpriteCHRReader is the optional interface mappers implement when
+// sprite pattern fetches need to come from a different CHR routing
+// than BG fetches (MMC5's 8×16 mode: BG uses the 'B' set, sprites
+// use the 'A' set). The cartridge layer falls back to ReadCHR when
+// the mapper doesn't implement it.
+type SpriteCHRReader interface {
+	ReadCHRSprite(addr uint16) uint8
+}
+
+// SpriteSizeHinter is the optional interface mappers implement when
+// they need to know the current PPU sprite size (8×8 vs 8×16) — MMC5
+// flips its BG-vs-sprite CHR routing based on this. PPU writes to
+// $2000 propagate the new size through Cartridge.SetSpriteSize.
+type SpriteSizeHinter interface {
+	SetSpriteSize(is8x16 bool)
+}
+
+// ScanlineNotifier is the optional interface mappers implement when
+// they need an explicit per-scanline tick from the PPU. MMC5 uses
+// this for its scanline-match IRQ; it can't use A12 like MMC3
+// because games whose BG and sprite share the same pattern table
+// (Metal Slader Glory and friends) never flip A12.
+type ScanlineNotifier interface {
+	NotifyScanline(scanline int, renderingEnabled bool)
+}
+
 // MirroringSource is the optional interface for mappers that override the
 // iNES-header mirroring mode dynamically (MMC1, MMC3 — anything with a
 // mirroring register). Falls back to the header value when the mapper
@@ -80,6 +114,8 @@ func NewMapper(mapperNumber uint8, data *CartridgeData) (Mapper, error) {
 		return NewMapper3(data), nil
 	case 4:
 		return NewMapper4(data), nil
+	case 5:
+		return NewMapper5(data), nil
 	case 10:
 		return NewMapper10(data), nil
 	case 69:

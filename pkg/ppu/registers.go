@@ -103,6 +103,12 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 			p.PPUSTATUS&PPUSTATUSVBlank != 0 {
 			p.NMIRequested = true
 		}
+		// MMC5 routes sprite vs BG fetches through different CHR sets
+		// in 8×16 mode; tell the cartridge about size transitions so
+		// the mapper picks the right set for subsequent fetches.
+		if oldValue&PPUCTRLSpriteSize != value&PPUCTRLSpriteSize && p.Cartridge != nil {
+			p.Cartridge.SetSpriteSize(value&PPUCTRLSpriteSize != 0)
+		}
 	case 0x2001: // PPUMASK
 		oldValue := p.PPUMASK
 		logger.LogPPU("Write PPUMASK: $%02X -> $%02X (BGShow=%v, SpriteShow=%v, Greyscale=%v)",

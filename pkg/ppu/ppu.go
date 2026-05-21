@@ -132,13 +132,24 @@ type PPU struct {
 	// Cartridge interface
 	Cartridge interface {
 		ReadCHR(addr uint16) uint8
+		ReadCHRSprite(addr uint16) uint8 // sprite-side fetch — MMC5 8×16 uses a different CHR set
 		WriteCHR(addr uint16, value uint8)
 		Step() // Called once per scanline for mapper IRQ
 		IsIRQPending() bool
 		ClearIRQ()
 		GetMirroring() int
 		NotifyA12(chrAddr uint16, renderingEnabled bool) // For MMC3 A12 edge detection
+		SetSpriteSize(is8x16 bool)                       // MMC5 tracks this for CHR routing
+		NotifyScanline(scanline int, renderingEnabled bool)
+		HasExpansion() bool // MMC5 — also the only mapper that remaps nametables mid-scanline
 	}
+
+	// dynamicMirroring is true when the mapper can change its nametable
+	// mapping mid-scanline (MMC5's $5105). Only then does the per-NT-read
+	// mirror refresh in readNameTable/writeVRAM earn its cost; every other
+	// mapper changes mirroring via CPU writes the scanline-boundary refresh
+	// already catches. Cached from Cartridge.HasExpansion() at SetCartridge.
+	dynamicMirroring bool
 }
 
 // NES screen dimensions in pixels (NTSC visible area).
@@ -220,14 +231,19 @@ func (p *PPU) Reset() {
 // SetCartridge sets the cartridge reference
 func (p *PPU) SetCartridge(cart interface {
 	ReadCHR(addr uint16) uint8
+	ReadCHRSprite(addr uint16) uint8
 	WriteCHR(addr uint16, value uint8)
 	Step()
 	IsIRQPending() bool
 	ClearIRQ()
 	GetMirroring() int
 	NotifyA12(chrAddr uint16, renderingEnabled bool)
+	SetSpriteSize(is8x16 bool)
+	NotifyScanline(scanline int, renderingEnabled bool)
+	HasExpansion() bool
 }) {
 	p.Cartridge = cart
+	p.dynamicMirroring = cart.HasExpansion()
 	p.refreshMirroringCache()
 }
 
@@ -303,6 +319,11 @@ func (p *PPU) Step() {
 		// instead of 0 under those conditions.
 		if p.Scanline == 0 && p.oddFrame && p.PPUMASK&PPUMASKBGShow != 0 {
 			p.Cycle = 1
+		}
+		// Tell the mapper about the new rendering scanline. MMC5 uses
+		// this for its scanline-match IRQ; other mappers ignore it.
+		if p.Cartridge != nil && p.Scanline >= 0 && p.Scanline < 240 {
+			p.Cartridge.NotifyScanline(int(p.Scanline), p.renderingEnabled())
 		}
 
 		if p.Scanline == 241 {
@@ -385,12 +406,28 @@ func (p *PPU) incrementY() {
 
 // readVRAM reads from VRAM
 func (p *PPU) readVRAM(addr uint16) uint8 {
+	return p.readVRAMInternal(addr, false)
+}
+
+// readVRAMSprite is like readVRAM but tells the cartridge that the
+// pattern fetch is for a sprite. MMC5 uses this to route through its
+// 'A' (sprite) CHR set in 8×16 mode; other mappers ignore it.
+func (p *PPU) readVRAMSprite(addr uint16) uint8 {
+	return p.readVRAMInternal(addr, true)
+}
+
+func (p *PPU) readVRAMInternal(addr uint16, sprite bool) uint8 {
 	addr = addr % 0x4000
 
 	if addr < 0x2000 {
 		// Pattern table
 		if p.Cartridge != nil {
-			value := p.Cartridge.ReadCHR(addr)
+			var value uint8
+			if sprite {
+				value = p.Cartridge.ReadCHRSprite(addr)
+			} else {
+				value = p.Cartridge.ReadCHR(addr)
+			}
 			// Debug: Log CHR reads via PPU - focus on pattern table reads with scanline info
 			if addr <= 0x1FFF && (addr < 0x100 || (addr >= 0x800 && addr < 0x900)) {
 				// Log first 256 bytes of each bank for key areas
@@ -422,6 +459,14 @@ func (p *PPU) readVRAM(addr uint16) uint8 {
 // writeVRAM writes to VRAM
 func (p *PPU) writeVRAM(addr uint16, value uint8) {
 	addr = addr % 0x4000
+
+	// Same MMC5 mid-rendering concern as readNameTable: $5105 can flip
+	// mid-frame and we cache mirroring at scanline start. Refresh so a
+	// $2007 write that lands inside the IRQ handler routes to the
+	// physical NT the game intends.
+	if p.dynamicMirroring && addr >= 0x2000 && addr < 0x3F00 {
+		p.refreshMirroringCache()
+	}
 
 	if addr < 0x2000 {
 		// Pattern table (CHR)
@@ -472,7 +517,15 @@ func (p *PPU) GetFramebuffer() []uint8 {
 
 // readNameTable reads from nametable with mirroring
 func (p *PPU) readNameTable(addr uint16) uint8 {
-	// Mirror the address based on cartridge mirroring mode
+	// MMC5 can change its $5105 NT-mapping mid-rendering (Metal Slader
+	// Glory flips it $00 ↔ $55 around scanline 162 to switch between the
+	// top-half image NT and the dialog-box NT). The per-scanline mirror
+	// cache misses those transitions; refresh here so the fetch sees the
+	// live mapping. Gated to dynamic-mirroring mappers so the ~16k
+	// per-frame interface dispatches don't burden every other game.
+	if p.dynamicMirroring {
+		p.refreshMirroringCache()
+	}
 	mirroredAddr := p.mirrorNameTableAddress(addr)
 	return p.VRAM[mirroredAddr]
 }

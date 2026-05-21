@@ -262,8 +262,8 @@ func (p *PPU) renderSpritePixel(x, y int, sprites []SpriteInfo) (uint32, bool, b
 				tileAddr = patternTableBase + uint16(sprite.TileIndex)*16 + uint16(pixelY)
 			}
 
-			patternLo := p.readVRAM(tileAddr)
-			patternHi := p.readVRAM(tileAddr + 8)
+			patternLo := p.readVRAMSprite(tileAddr)
+			patternHi := p.readVRAMSprite(tileAddr + 8)
 
 			// Get pixel color
 			colorIndex := getPixelColor(patternLo, patternHi, pixelX)
@@ -331,7 +331,14 @@ func (p *PPU) renderPixel() {
 	var finalColor uint32
 
 	if spriteColor&0xFF000000 != 0 { // Sprite pixel is not transparent
-		if spritePriority || (bgColor&0x00FFFFFF) == (p.PaletteManager.GetBackgroundColor(0, 0)&0x00FFFFFF) {
+		bgOpaque := p.isBackgroundPixelOpaque(x, y)
+
+		// Sprite priority: 0 = in front of BG, 1 = behind BG. Hardware
+		// gates on the BG *pattern* value (color 0 = transparent), NOT
+		// on the rendered RGB — palette tricks like Metal Slader Glory's
+		// title screen where palette 3 maps both color 0 and color 1 to
+		// $0F still need BG color 1 to occlude the sprite.
+		if spritePriority || !bgOpaque {
 			finalColor = spriteColor
 		} else {
 			finalColor = bgColor
@@ -344,7 +351,6 @@ func (p *PPU) renderPixel() {
 		// output-circuitry reason). blargg's right_edge test exercises
 		// it directly.
 		if sprite0Hit && p.PPUSTATUS&PPUSTATUSSprite0Hit == 0 && x != 255 {
-			bgOpaque := p.isBackgroundPixelOpaque(x, y)
 			spriteEnabled := p.PPUMASK&PPUMASKSpriteShow != 0
 			bgEnabled := p.PPUMASK&PPUMASKBGShow != 0
 			leftClipped := x < 8 && (p.PPUMASK&(PPUMASKSpriteLeft|PPUMASKBGLeft)) != (PPUMASKSpriteLeft|PPUMASKBGLeft)
