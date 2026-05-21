@@ -244,11 +244,9 @@ func (p *PPU) spritePixelAt(x int) (uint32, bool, bool) {
 }
 
 // renderPixel renders a single pixel combining background and sprites. The
-// caller (PPU.Step) guarantees Scanline ∈ [0,240) and Cycle ∈ [0,256), so no
-// bounds check is needed here.
-func (p *PPU) renderPixel() {
-	x := p.Cycle
-	y := p.Scanline
+// caller (StepN) passes the current cycle/scanline as x/y and guarantees
+// y ∈ [0,240) and x ∈ [0,256), so no bounds check is needed here.
+func (p *PPU) renderPixel(x, y int) {
 	index := y*256 + x
 
 	if !p.renderEnabled {
@@ -278,8 +276,8 @@ func (p *PPU) renderPixel() {
 	}
 
 	// Evaluate sprites once per scanline (fetches each sprite's pattern row).
-	if p.Cycle == 0 {
-		p.evaluateSprites(p.Scanline)
+	if x == 0 {
+		p.evaluateSprites(y)
 	}
 
 	finalColor := bgColor

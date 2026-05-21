@@ -286,137 +286,152 @@ func (p *PPU) SetCartridge(cart interface {
 	p.refreshMirroringCache()
 }
 
-// Step executes one PPU cycle
-func (p *PPU) Step() {
-	// NMI-assertion countdown — see PPU.nmiAssertCountdown. Tick down
-	// here so the assertion lands N PPU cycles after the VBL set Step.
-	// Re-check VBL at expiry: if a CPU $2002 read cleared the flag during
-	// the countdown window, NMI is suppressed (blargg suppression test
-	// rows 05-06: flag read back as set but NMI never fires because the
-	// quickly-cleared flag never held the NMI line low long enough).
-	if p.nmiAssertCountdown > 0 {
-		p.nmiAssertCountdown--
-		if p.nmiAssertCountdown == 0 && p.PPUCTRL&PPUCTRLNMIEnable != 0 && p.PPUSTATUS&PPUSTATUSVBlank != 0 {
-			p.NMIRequested = true
-		}
-	}
+// Step executes one PPU cycle. Equivalent to StepN(1); retained for
+// single-cycle callers (unit tests).
+func (p *PPU) Step() { p.StepN(1) }
 
-	// Render visible pixels only — cycles 256-340 of a visible scanline
-	// produce no output, so gating the call here skips ~85 no-op renderPixel
-	// calls per scanline instead of paying the call + early-return.
-	if p.Scanline >= 0 && p.Scanline < 240 && p.Cycle < 256 {
-		p.renderPixel()
-	}
-
-	// MMC3 IRQ + per-scanline Y increment both need: rendering enabled, and we're
-	// on a visible scanline (or pre-render). The Y increment makes mid-frame $2006
-	// writes propagate for split-screen effects (e.g. SMB3 title screen) — the
-	// renderer reads v.coarseY/fineY as the *current* scanline's row, not a
-	// frame-start scroll.
-	// renderingActive ⇔ on a render-producing scanline (pre-render -1 .. 239)
-	// with rendering enabled. Scanline is always ≥ -1, so the lower bound is
-	// implicit and this reduces to a single compare against the cached flag.
-	renderingActive := p.Scanline < 240 && p.renderEnabled
-	if renderingActive && p.Cartridge != nil {
-		// MMC3 IRQ clocking — A12 rising edges with a ~3-CPU-cycle low
-		// filter. The counted rise's PPU cycle depends on PPUCTRL.BGTable
-		// (cached in mapperTickCycle):
-		//   BG=$0000, Sprites=$1000: first sprite-pattern fetch (~261);
-		//     empirically cycle 273 matches blargg scanline_timing.
-		//   BG=$1000, Sprites=$0000: prefetch BG-pattern fetch after the
-		//     64-cycle sprite-fetch low window (~cycle 325, emu cycle 337).
-		// Plus a one-shot extra clock on the first rendering scanline
-		// after PPUMASK 0→on (the render-off period satisfies the filter
-		// for the first BG-pattern fetch at cycle ~5 / emu cycle 17;
-		// subsequent cycle-5 rises are filtered out by the short
-		// inter-scanline low gap). bg1000 ⇔ mapperTickCycle == 337.
-		clockMapper := p.Cycle == p.mapperTickCycle
-		if !clockMapper && p.mmc3FirstClockPending && p.mapperTickCycle == 337 && p.Cycle == 17 {
-			clockMapper = true
-			p.mmc3FirstClockPending = false
-		}
-		if clockMapper {
-			p.Cartridge.Step()
-			p.MapperIRQ = p.Cartridge.IsIRQPending()
-		}
-	}
-	if renderingActive && p.Cycle == 256 {
-		p.incrementY()
-	}
-
-	p.Cycle++
-	if p.Cycle >= 341 {
-		p.Cycle = 0
-		p.refreshMirroringCache()
-
-		p.Scanline++
-		// Odd-frame skip: NTSC PPU drops the first idle tick (cycle 0) of
-		// scanline 0 on odd frames when background rendering is enabled.
-		// Realised here by starting the new visible scanline at cycle 1
-		// instead of 0 under those conditions.
-		if p.Scanline == 0 && p.oddFrame && p.PPUMASK&PPUMASKBGShow != 0 {
-			p.Cycle = 1
-		}
-		// Tell the mapper about the new rendering scanline. MMC5 uses
-		// this for its scanline-match IRQ; other mappers ignore it.
-		if p.Cartridge != nil && p.Scanline >= 0 && p.Scanline < 240 {
-			p.Cartridge.NotifyScanline(int(p.Scanline), p.renderingEnabled())
-		}
-
-		if p.Scanline == 241 {
-			// VBlank start: set VBlank flag immediately so a CPU $2002
-			// read here observes it (vbl_set_time T+5). The NMI assertion
-			// is deferred by nmiAssertDelayPPUCycles so nmi_timing's
-			// calibration table lands on the right CPU instruction.
-			if !p.vblSuppressed {
-				p.PPUSTATUS |= PPUSTATUSVBlank
-				if p.PPUCTRL&PPUCTRLNMIEnable != 0 {
-					p.nmiAssertCountdown = nmiAssertDelayPPUCycles
-				}
+// StepN executes n PPU cycles. nes.Step calls this once per CPU cycle batch
+// (3 PPU cycles per CPU cycle) rather than calling Step in a loop, so the
+// per-cycle Cycle/Scanline counters live in locals for the whole batch instead
+// of being reloaded from the struct around every internal call (renderPixel,
+// Cartridge.Step, etc., which the compiler must assume could alias p.Cycle/
+// p.Scanline). They're written back before returning. Nothing outside the PPU
+// reads p.Cycle/p.Scanline mid-batch — only CPU-side register access does, and
+// that never runs while StepN is executing.
+func (p *PPU) StepN(n int) {
+	cycle, scanline := p.Cycle, p.Scanline
+	for i := 0; i < n; i++ {
+		// NMI-assertion countdown — see PPU.nmiAssertCountdown. Tick down
+		// here so the assertion lands N PPU cycles after the VBL set Step.
+		// Re-check VBL at expiry: if a CPU $2002 read cleared the flag during
+		// the countdown window, NMI is suppressed (blargg suppression test
+		// rows 05-06: flag read back as set but NMI never fires because the
+		// quickly-cleared flag never held the NMI line low long enough).
+		if p.nmiAssertCountdown > 0 {
+			p.nmiAssertCountdown--
+			if p.nmiAssertCountdown == 0 && p.PPUCTRL&PPUCTRLNMIEnable != 0 && p.PPUSTATUS&PPUSTATUSVBlank != 0 {
+				p.NMIRequested = true
 			}
-			p.vblSuppressed = false
 		}
 
-		if p.Scanline >= 261 {
-			p.Scanline = -1 // Pre-render scanline
-
-			// Pre-render line: clear VBlank, sprite 0 hit, and sprite overflow
-			// flags. NESdev says this is at cycle 1 of pre-render; doing it
-			// here at the (260, 340) → (-1, 0) wrap places it one PPU cycle
-			// earlier in absolute terms. Tests vbl_clear_time / suppression
-			// pass with this earlier timing — moving the clear to (-1, 1)
-			// breaks test 3's row-06 expectation.
-			p.PPUSTATUS &^= PPUSTATUSVBlank
-			p.PPUSTATUS &^= PPUSTATUSSprite0Hit
-			p.PPUSTATUS &^= PPUSTATUSSpriteOverflow
-
-			p.FrameComplete = true
-			p.Frame++
-			p.oddFrame = !p.oddFrame
+		// Render visible pixels only — cycles 256-340 of a visible scanline
+		// produce no output, so gating the call here skips ~85 no-op renderPixel
+		// calls per scanline instead of paying the call + early-return.
+		if scanline >= 0 && scanline < 240 && cycle < 256 {
+			p.renderPixel(cycle, scanline)
 		}
-	}
 
-	// Handle pre-render scanline (scanline -1/261)
-	if p.Scanline == -1 {
-		// Copy horizontal scroll components from t to v at start of pre-render line
-		if p.Cycle == 304 && p.renderingEnabled() {
-			// Copy vertical scroll components from t to v
-			p.v = (p.v & 0x841F) | (p.t & 0x7BE0)
+		// MMC3 IRQ + per-scanline Y increment both need: rendering enabled, and we're
+		// on a visible scanline (or pre-render). The Y increment makes mid-frame $2006
+		// writes propagate for split-screen effects (e.g. SMB3 title screen) — the
+		// renderer reads v.coarseY/fineY as the *current* scanline's row, not a
+		// frame-start scroll.
+		// renderingActive ⇔ on a render-producing scanline (pre-render -1 .. 239)
+		// with rendering enabled. Scanline is always ≥ -1, so the lower bound is
+		// implicit and this reduces to a single compare against the cached flag.
+		renderingActive := scanline < 240 && p.renderEnabled
+		if renderingActive && p.Cartridge != nil {
+			// MMC3 IRQ clocking — A12 rising edges with a ~3-CPU-cycle low
+			// filter. The counted rise's PPU cycle depends on PPUCTRL.BGTable
+			// (cached in mapperTickCycle):
+			//   BG=$0000, Sprites=$1000: first sprite-pattern fetch (~261);
+			//     empirically cycle 273 matches blargg scanline_timing.
+			//   BG=$1000, Sprites=$0000: prefetch BG-pattern fetch after the
+			//     64-cycle sprite-fetch low window (~cycle 325, emu cycle 337).
+			// Plus a one-shot extra clock on the first rendering scanline
+			// after PPUMASK 0→on (the render-off period satisfies the filter
+			// for the first BG-pattern fetch at cycle ~5 / emu cycle 17;
+			// subsequent cycle-5 rises are filtered out by the short
+			// inter-scanline low gap). bg1000 ⇔ mapperTickCycle == 337.
+			clockMapper := cycle == p.mapperTickCycle
+			if !clockMapper && p.mmc3FirstClockPending && p.mapperTickCycle == 337 && cycle == 17 {
+				clockMapper = true
+				p.mmc3FirstClockPending = false
+			}
+			if clockMapper {
+				p.Cartridge.Step()
+				p.MapperIRQ = p.Cartridge.IsIRQPending()
+			}
 		}
-		if p.Cycle == 257 && p.renderingEnabled() {
-			// Copy horizontal scroll components from t to v
+		if renderingActive && cycle == 256 {
+			p.incrementY()
+		}
+
+		cycle++
+		if cycle >= 341 {
+			cycle = 0
+			p.refreshMirroringCache()
+
+			scanline++
+			// Odd-frame skip: NTSC PPU drops the first idle tick (cycle 0) of
+			// scanline 0 on odd frames when background rendering is enabled.
+			// Realised here by starting the new visible scanline at cycle 1
+			// instead of 0 under those conditions.
+			if scanline == 0 && p.oddFrame && p.PPUMASK&PPUMASKBGShow != 0 {
+				cycle = 1
+			}
+			// Tell the mapper about the new rendering scanline. MMC5 uses
+			// this for its scanline-match IRQ; other mappers ignore it.
+			if p.Cartridge != nil && scanline >= 0 && scanline < 240 {
+				p.Cartridge.NotifyScanline(scanline, p.renderingEnabled())
+			}
+
+			if scanline == 241 {
+				// VBlank start: set VBlank flag immediately so a CPU $2002
+				// read here observes it (vbl_set_time T+5). The NMI assertion
+				// is deferred by nmiAssertDelayPPUCycles so nmi_timing's
+				// calibration table lands on the right CPU instruction.
+				if !p.vblSuppressed {
+					p.PPUSTATUS |= PPUSTATUSVBlank
+					if p.PPUCTRL&PPUCTRLNMIEnable != 0 {
+						p.nmiAssertCountdown = nmiAssertDelayPPUCycles
+					}
+				}
+				p.vblSuppressed = false
+			}
+
+			if scanline >= 261 {
+				scanline = -1 // Pre-render scanline
+
+				// Pre-render line: clear VBlank, sprite 0 hit, and sprite overflow
+				// flags. NESdev says this is at cycle 1 of pre-render; doing it
+				// here at the (260, 340) → (-1, 0) wrap places it one PPU cycle
+				// earlier in absolute terms. Tests vbl_clear_time / suppression
+				// pass with this earlier timing — moving the clear to (-1, 1)
+				// breaks test 3's row-06 expectation.
+				p.PPUSTATUS &^= PPUSTATUSVBlank
+				p.PPUSTATUS &^= PPUSTATUSSprite0Hit
+				p.PPUSTATUS &^= PPUSTATUSSpriteOverflow
+
+				p.FrameComplete = true
+				p.Frame++
+				p.oddFrame = !p.oddFrame
+			}
+		}
+
+		// Handle pre-render scanline (scanline -1/261)
+		if scanline == -1 {
+			// Copy horizontal scroll components from t to v at start of pre-render line
+			if cycle == 304 && p.renderingEnabled() {
+				// Copy vertical scroll components from t to v
+				p.v = (p.v & 0x841F) | (p.t & 0x7BE0)
+			}
+			if cycle == 257 && p.renderingEnabled() {
+				// Copy horizontal scroll components from t to v
+				p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
+			}
+		}
+
+		// Copy horizontal scroll from t to v at the start of each visible
+		// scanline and invalidate the single-tile cache so the first fetch
+		// uses the just-restored v / x.
+		if scanline >= 0 && scanline < 240 && cycle == 0 && p.renderingEnabled() {
 			p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
+			p.x = p.xTemp
+			p.currentBGTileX = -1
 		}
 	}
-
-	// Copy horizontal scroll from t to v at the start of each visible
-	// scanline and invalidate the single-tile cache so the first fetch
-	// uses the just-restored v / x.
-	if p.Scanline >= 0 && p.Scanline < 240 && p.Cycle == 0 && p.renderingEnabled() {
-		p.v = (p.v & 0xFBE0) | (p.t & 0x041F)
-		p.x = p.xTemp
-		p.currentBGTileX = -1
-	}
+	p.Cycle, p.Scanline = cycle, scanline
 }
 
 // incrementY advances v's vertical position by one scanline per the NESdev

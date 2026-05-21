@@ -139,9 +139,7 @@ func (n *NES) Step() {
 		n.pendingNMI = true
 	}
 
-	for i := 0; i < cpuCycles*3; i++ {
-		n.PPU.Step()
-	}
+	n.PPU.StepN(cpuCycles * 3)
 
 	// The PPU asserts NMIRequested at most once per frame (the VBL-set
 	// transition), and nmiDelay only needs to be true by the end of this
@@ -152,9 +150,7 @@ func (n *NES) Step() {
 		n.nmiDelay = true
 	}
 
-	for i := 0; i < cpuCycles; i++ {
-		n.APU.Step()
-	}
+	n.APU.StepN(cpuCycles)
 
 	// CPU-rate mapper timers (FME-7's IRQ counter).
 	if n.Cartridge != nil {

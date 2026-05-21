@@ -255,55 +255,72 @@ func (a *APU) Reset() {
 	a.initializeChannels()
 }
 
-// Step executes one APU cycle
-func (a *APU) Step() {
-	a.Cycles++
+// Step executes one APU cycle. Equivalent to StepN(1); retained for callers
+// that advance the APU a single cycle at a time (tests).
+func (a *APU) Step() { a.StepN(1) }
 
-	// Frame counter runs at 240Hz (CPU speed / 7457.5)
-	a.FrameCycleCount++
-	if a.FrameCycleCount >= 7458 {
-		a.FrameCycleCount = 0
-		a.stepFrameCounter()
-	}
-
-	// Step audio channels. Each is guarded at the call site so a disabled
-	// channel costs a single bool check rather than a function call that
-	// immediately returns — DMC in particular is off for most games.
-	if a.Pulse1.Enabled {
-		a.stepPulse(&a.Pulse1)
-	}
-	if a.Pulse2.Enabled {
-		a.stepPulse(&a.Pulse2)
-	}
-	if a.Triangle.Enabled {
-		a.stepTriangle()
-	}
-	if a.Noise.Enabled {
-		a.stepNoise()
-	}
-	if a.DMC.Enabled {
-		a.stepDMC()
-	}
-
-	// Generate audio sample with precise fractional timing
-	// NES CPU frequency: 21.477272 MHz / 12 = 1.7897725 MHz (NTSC)
-	// Target sample rate: 44100 Hz
-	// Cycles per sample: 1789772.5 / 44100 = 40.5845578231293
+// StepN executes n APU cycles. nes.Step calls this once per CPU-cycle batch
+// rather than looping Step, so the per-cycle counters (Cycles, FrameCycleCount,
+// SampleAccumulator) live in locals for the whole batch instead of being
+// reloaded from the struct around every channel-step call. They're written
+// back before returning; no callee (stepFrameCounter, channel steps,
+// mixChannels) reads them.
+func (a *APU) StepN(n int) {
+	// NES CPU frequency 1.7897725 MHz / 44100 Hz target = 40.58455... cycles
+	// per output sample; the fractional accumulator keeps the rate exact.
 	const cyclesPerSample = 40.5845578231293
-	
-	a.SampleAccumulator += 1.0
-	if a.SampleAccumulator >= cyclesPerSample {
-		a.SampleAccumulator -= cyclesPerSample
-		sample := a.mixChannels()
-		a.Output = append(a.Output, sample)
 
-		// Prevent buffer from growing too large
-		if len(a.Output) > 2048 {
-			// Keep only the most recent samples
-			copy(a.Output, a.Output[len(a.Output)-1024:])
-			a.Output = a.Output[:1024]
+	cycles := a.Cycles
+	frameCycleCount := a.FrameCycleCount
+	sampleAcc := a.SampleAccumulator
+
+	for i := 0; i < n; i++ {
+		cycles++
+
+		// Frame counter runs at 240Hz (CPU speed / 7457.5)
+		frameCycleCount++
+		if frameCycleCount >= 7458 {
+			frameCycleCount = 0
+			a.stepFrameCounter()
+		}
+
+		// Step audio channels. Each is guarded at the call site so a disabled
+		// channel costs a single bool check rather than a function call that
+		// immediately returns — DMC in particular is off for most games.
+		if a.Pulse1.Enabled {
+			a.stepPulse(&a.Pulse1)
+		}
+		if a.Pulse2.Enabled {
+			a.stepPulse(&a.Pulse2)
+		}
+		if a.Triangle.Enabled {
+			a.stepTriangle()
+		}
+		if a.Noise.Enabled {
+			a.stepNoise()
+		}
+		if a.DMC.Enabled {
+			a.stepDMC()
+		}
+
+		sampleAcc += 1.0
+		if sampleAcc >= cyclesPerSample {
+			sampleAcc -= cyclesPerSample
+			sample := a.mixChannels()
+			a.Output = append(a.Output, sample)
+
+			// Prevent buffer from growing too large
+			if len(a.Output) > 2048 {
+				// Keep only the most recent samples
+				copy(a.Output, a.Output[len(a.Output)-1024:])
+				a.Output = a.Output[:1024]
+			}
 		}
 	}
+
+	a.Cycles = cycles
+	a.FrameCycleCount = frameCycleCount
+	a.SampleAccumulator = sampleAcc
 }
 
 // stepFrameCounter steps the frame counter
