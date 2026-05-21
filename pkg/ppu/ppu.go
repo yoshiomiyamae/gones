@@ -30,22 +30,6 @@ type PPU struct {
 	// Scrolling
 	ScrollY uint8 // Y scroll position
 
-	// VRAM
-	VRAM [0x4000]uint8
-
-	// OAM (Object Attribute Memory)
-	OAM [256]uint8
-
-	// Frame buffer (256x240)
-	FrameBuffer [256 * 240]uint32
-
-	// Persistent frame buffer for games with intermittent rendering
-	PersistentFrameBuffer [256 * 240]uint32
-
-	// Track if any meaningful rendering occurred this frame
-	renderingOccurred bool
-	lastRenderFrame   uint64
-
 	// Timing
 	Cycle         int
 	Scanline      int
@@ -155,6 +139,14 @@ type PPU struct {
 	// mapper changes mirroring via CPU writes the scanline-boundary refresh
 	// already catches. Cached from Cartridge.HasExpansion() at SetCartridge.
 	dynamicMirroring bool
+
+	// Large arrays last so the small, per-pixel-hot scalar fields above
+	// cluster into a few cache lines instead of being pushed hundreds of KB
+	// apart by these buffers (which would alias the FrameBuffer write stream
+	// against the control fields and cost ~2% on full-screen redraws).
+	VRAM        [0x4000]uint8     // pattern/nametable/palette space
+	OAM         [256]uint8        // sprite attribute memory
+	FrameBuffer [256 * 240]uint32 // 256x240 ARGB output
 }
 
 // NES screen dimensions in pixels (NTSC visible area).
@@ -232,10 +224,6 @@ func (p *PPU) Reset() {
 	if p.PaletteManager != nil {
 		p.PaletteManager.SetEmphasis(0)
 	}
-
-	// Initialize persistent buffer with background color to indicate "no content yet"
-	// Don't reset persistent buffer on Reset to preserve accumulated content
-	p.renderingOccurred = false
 }
 
 // SetCartridge sets the cartridge reference
@@ -361,7 +349,6 @@ func (p *PPU) Step() {
 			p.PPUSTATUS &^= PPUSTATUSSpriteOverflow
 
 			p.FrameComplete = true
-			p.handleFrameCompletion()
 			p.Frame++
 			p.oddFrame = !p.oddFrame
 		}
@@ -666,35 +653,6 @@ func (p *PPU) readOpenBus() uint8 {
 	return result
 }
 
-// handleFrameCompletion manages persistent frame buffer and rendering state
-func (p *PPU) handleFrameCompletion() {
-	// Debug: Check first few pixels of FrameBuffer before completion handling
-	nonZeroPixels := 0
-	for i := 0; i < 256; i++ {
-		if p.FrameBuffer[i] != 0 {
-			nonZeroPixels++
-		}
-	}
-
-	// Store the rendering occurred flag before resetting
-	hadRendering := p.renderingOccurred
-
-	// Reset rendering flag for next frame FIRST
-	p.renderingOccurred = false
-
-	// If rendering occurred this frame, update the last render frame
-	if hadRendering {
-		p.lastRenderFrame = p.Frame
-		logger.LogPPU("Frame %d: Rendering occurred, updating persistent buffer", p.Frame)
-
-		// Ensure FrameBuffer has the rendered content for display
-		// (FrameBuffer should already have the content from renderPixel calls)
-	} else {
-		// Keep previous frame content to prevent flickering
-		// Don't copy persistent buffer unnecessarily
-	}
-}
-
 // ppuState is the on-disk layout for PPU state. Frame buffers are excluded;
 // they get redrawn from VRAM/OAM/palette by the next scanline anyway.
 type ppuState struct {
@@ -780,36 +738,5 @@ func (p *PPU) LoadState(r io.Reader) error {
 func (p *PPU) invalidateRenderCache() {
 	p.currentBGTileX = -1
 	p.currentSpriteCount = 0
-}
-
-// GetDisplayFrameBuffer returns the frame buffer that should be displayed
-// This method provides the correct buffer considering persistent rendering
-func (p *PPU) GetDisplayFrameBuffer() []uint32 {
-	// If recent rendering occurred, return current buffer
-	frameSinceLastRender := p.Frame - p.lastRenderFrame
-
-	// Debug logging disabled for production
-
-	if frameSinceLastRender <= 1 || p.renderingOccurred {
-		return p.FrameBuffer[:]
-	}
-
-	// Otherwise, return persistent buffer if it has content
-	if frameSinceLastRender < 3600 { // Keep visible for ~1 minute (3600 frames)
-		// Check if persistent buffer has meaningful content
-		nonZeroCount := 0
-		for i := 0; i < 100; i++ { // Sample first 100 pixels
-			if p.PersistentFrameBuffer[i] != 0 {
-				nonZeroCount++
-			}
-		}
-
-		// Debug logging disabled for production
-
-		return p.PersistentFrameBuffer[:]
-	}
-
-	// Fall back to current buffer
-	return p.FrameBuffer[:]
 }
 

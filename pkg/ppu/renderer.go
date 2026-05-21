@@ -331,9 +331,5 @@ func (p *PPU) renderPixel() {
 		}
 	}
 
-	// Rendering is enabled here (early return above), so always update both
-	// buffers and mark that meaningful rendering occurred this frame.
 	p.FrameBuffer[index] = finalColor
-	p.PersistentFrameBuffer[index] = finalColor
-	p.renderingOccurred = true
 }

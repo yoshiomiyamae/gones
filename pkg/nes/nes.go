@@ -206,7 +206,7 @@ func (n *NES) GetFramebufferRaw() []uint32 {
 	return n.PPU.FrameBuffer[:]
 }
 
-// GetDisplayFramebufferRaw returns the display framebuffer considering persistent rendering
+// GetDisplayFramebufferRaw returns the framebuffer to display this frame.
 func (n *NES) GetDisplayFramebufferRaw() []uint32 {
 	return n.PPU.FrameBuffer[:]
 }
