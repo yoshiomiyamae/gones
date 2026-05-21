@@ -103,14 +103,19 @@ type PPU struct {
 	currentBGTile  BackgroundTile
 	currentBGTileX int
 
-	// Rendering. currentSprites holds the sprites overlapping the current
-	// scanline (max 8), evaluated once at cycle 0; currentSpriteCount is how
+	// Rendering. currentSprites (declared with the large arrays below) holds
+	// the sprites overlapping the current scanline; currentSpriteCount is how
 	// many are valid. Each entry carries its pre-fetched pattern row bytes so
-	// per-pixel sprite rendering needs no CHR fetch. Fixed-size array to avoid
-	// a per-scanline heap allocation.
+	// per-pixel sprite rendering needs no CHR fetch.
 	PaletteManager     *PaletteManager
-	currentSprites     [8]SpriteInfo
 	currentSpriteCount int
+
+	// NoSpriteLimit disables the per-scanline 8-sprite cap when set: all
+	// sprites overlapping a scanline render, removing the hardware sprite
+	// flicker. The sprite-overflow STATUS flag still latches per the real
+	// 8-limit, so game logic that polls it is unaffected. Runtime display
+	// preference — not part of save-state, untouched by Reset.
+	NoSpriteLimit bool
 
 	// PPU read buffer for $2007 reads
 	readBuffer uint8
@@ -144,15 +149,25 @@ type PPU struct {
 	// cluster into a few cache lines instead of being pushed hundreds of KB
 	// apart by these buffers (which would alias the FrameBuffer write stream
 	// against the control fields and cost ~2% on full-screen redraws).
-	VRAM        [0x4000]uint8     // pattern/nametable/palette space
-	OAM         [256]uint8        // sprite attribute memory
-	FrameBuffer [256 * 240]uint32 // 256x240 ARGB output
+	// currentSprites is sized for the worst case (all OAM entries on one
+	// scanline) so NoSpriteLimit mode never overruns it; normal mode only
+	// touches the first maxSpritesPerScanline.
+	currentSprites [totalOAMSprites]SpriteInfo
+	VRAM           [0x4000]uint8     // pattern/nametable/palette space
+	OAM            [256]uint8        // sprite attribute memory
+	FrameBuffer    [256 * 240]uint32 // 256x240 ARGB output
 }
 
 // NES screen dimensions in pixels (NTSC visible area).
 const (
 	ScreenWidth  = 256
 	ScreenHeight = 240
+)
+
+// Sprite evaluation limits.
+const (
+	totalOAMSprites       = 64 // primary OAM holds 64 sprites (256 bytes / 4)
+	maxSpritesPerScanline = 8  // hardware secondary-OAM capacity per scanline
 )
 
 // PPUCTRL flags
@@ -739,4 +754,3 @@ func (p *PPU) invalidateRenderCache() {
 	p.currentBGTileX = -1
 	p.currentSpriteCount = 0
 }
-

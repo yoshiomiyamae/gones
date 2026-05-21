@@ -36,6 +36,14 @@ func (g *NESGUI) toggleCheats() {
 func (g *NESGUI) toggleFilter() {
 	logger.LogInfo("Analog filter chain: %v", g.nes.APU.ToggleFilter())
 }
+func (g *NESGUI) toggleSpriteLimit() {
+	g.nes.PPU.NoSpriteLimit = !g.nes.PPU.NoSpriteLimit
+	state := "8/scanline (hardware)"
+	if g.nes.PPU.NoSpriteLimit {
+		state = "unlimited (no flicker)"
+	}
+	logger.LogInfo("Sprite limit: %s", state)
+}
 func (g *NESGUI) toggleExpansionAudio() {
 	muted, ok := g.nes.APU.ToggleExpansionMute()
 	if !ok {
@@ -63,6 +71,7 @@ var hotkeyTable = []hotkey{
 	{sdl.K_e, sdl.KMOD_CTRL, (*NESGUI).toggleRecording, false},
 	{sdl.K_6, 0, (*NESGUI).toggleExpansionAudio, false},
 	{sdl.K_7, 0, (*NESGUI).toggleFilter, false},
+	{sdl.K_8, 0, (*NESGUI).toggleSpriteLimit, false},
 }
 
 // isHotkeyKey reports whether a key is one of those the emulator owns. Used
@@ -71,10 +80,10 @@ var hotkeyTable = []hotkey{
 func isHotkeyKey(k sdl.Keycode) bool {
 	return k == sdl.K_ESCAPE || k == sdl.K_TAB ||
 		(k >= sdl.K_F1 && k <= sdl.K_F12) ||
-		(k >= sdl.K_1 && k <= sdl.K_7)
+		(k >= sdl.K_1 && k <= sdl.K_8)
 }
 
-// handleHotkey processes emulator-level hotkeys (Esc/Tab/F1-F12/1-7).
+// handleHotkey processes emulator-level hotkeys (Esc/Tab/F1-F12/1-8).
 // Returns true if the event was consumed; false means it's a game input and
 // should be forwarded to the InputManager.
 func (g *NESGUI) handleHotkey(e *sdl.KeyboardEvent) bool {

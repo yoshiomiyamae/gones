@@ -45,6 +45,53 @@ func TestPPUReset(t *testing.T) {
 	}
 }
 
+// TestNoSpriteLimit verifies the per-scanline sprite cap: the default mode
+// renders at most 8 sprites and the NoSpriteLimit mode renders all of them,
+// while both latch the overflow STATUS flag once a 9th sprite is present.
+func TestNoSpriteLimit(t *testing.T) {
+	ppu := createTestPPU()
+
+	// Place 10 sprites all on scanline 10 (OAM Y = screen Y - 1, so Y=9).
+	const scanline = 10
+	for i := 0; i < 10; i++ {
+		ppu.OAM[i*4] = scanline - 1   // Y
+		ppu.OAM[i*4+1] = 0            // tile
+		ppu.OAM[i*4+2] = 0            // attributes
+		ppu.OAM[i*4+3] = uint8(i * 8) // X (spread across the line)
+	}
+
+	// Default: capped at 8, overflow flag latched by the 9th.
+	ppu.PPUSTATUS = 0
+	ppu.NoSpriteLimit = false
+	ppu.evaluateSprites(scanline)
+	if ppu.currentSpriteCount != 8 {
+		t.Errorf("limited mode: want 8 sprites, got %d", ppu.currentSpriteCount)
+	}
+	if ppu.PPUSTATUS&PPUSTATUSSpriteOverflow == 0 {
+		t.Error("limited mode: overflow flag should be set with 10 sprites on a line")
+	}
+
+	// No-limit: all 10 render, overflow still latched (game logic unaffected).
+	// The sprite count is the load-bearing assertion for the feature (the
+	// overflow flag can also latch via the next-scanline lookahead, so it
+	// alone wouldn't prove the past-8 collection ran).
+	ppu.PPUSTATUS = 0
+	ppu.NoSpriteLimit = true
+	ppu.evaluateSprites(scanline)
+	if ppu.currentSpriteCount != 10 {
+		t.Errorf("no-limit mode: want 10 sprites, got %d", ppu.currentSpriteCount)
+	}
+	// The 9th/10th sprites (past the hardware cap) must be collected in OAM
+	// order so priority is preserved.
+	if ppu.currentSprites[8].OAMIndex != 8 || ppu.currentSprites[9].OAMIndex != 9 {
+		t.Errorf("no-limit mode: sprites past the cap not collected in OAM order: [8]=%d [9]=%d",
+			ppu.currentSprites[8].OAMIndex, ppu.currentSprites[9].OAMIndex)
+	}
+	if ppu.PPUSTATUS&PPUSTATUSSpriteOverflow == 0 {
+		t.Error("no-limit mode: overflow flag must still latch per the real 8-limit")
+	}
+}
+
 // Test palette operations
 func TestPaletteOperations(t *testing.T) {
 	ppu := createTestPPU()

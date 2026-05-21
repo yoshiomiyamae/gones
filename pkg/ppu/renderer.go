@@ -28,7 +28,7 @@ type BackgroundTile struct {
 // per-pixel rendering only shifts out bits — no CHR fetch per pixel.
 type SpriteInfo struct {
 	SpriteData
-	OAMIndex  int   // Original index in OAM (for sprite 0 detection)
+	OAMIndex  uint8 // Original index in OAM (for sprite 0 detection)
 	PatternLo uint8 // Low bit plane for this scanline's row
 	PatternHi uint8 // High bit plane for this scanline's row
 }
@@ -154,13 +154,17 @@ func (p *PPU) evaluateSprites(scanline int) {
 	// appears at scanline 144 — so we shift by +1 here and in spritePixelAt.
 	// Secondary OAM holds 8 sprites; overflow fires when a 9th matches.
 	count := 0
-	for i := 0; i < 64; i++ {
+	for i := 0; i < totalOAMSprites; i++ {
 		spriteY := int(p.OAM[i*4]) + 1
 
 		if scanline >= spriteY && scanline < spriteY+spriteHeight {
-			if count >= 8 {
+			// The 9th+ sprite latches the overflow flag exactly as on
+			// hardware. NoSpriteLimit keeps it for rendering anyway.
+			if count >= maxSpritesPerScanline {
 				p.PPUSTATUS |= PPUSTATUSSpriteOverflow
-				break
+				if !p.NoSpriteLimit {
+					break
+				}
 			}
 			s := SpriteInfo{
 				SpriteData: SpriteData{
@@ -169,7 +173,7 @@ func (p *PPU) evaluateSprites(scanline int) {
 					Attributes: p.OAM[i*4+2],
 					X:          p.OAM[i*4+3],
 				},
-				OAMIndex: i,
+				OAMIndex: uint8(i),
 			}
 			p.fetchSpritePattern(&s, scanline, spriteHeight)
 			p.currentSprites[count] = s
@@ -182,11 +186,11 @@ func (p *PPU) evaluateSprites(scanline int) {
 	// eval phase doesn't know about the render list.
 	next := scanline + 1
 	lookahead := 0
-	for i := 0; i < 64; i++ {
+	for i := 0; i < totalOAMSprites; i++ {
 		spriteY := int(p.OAM[i*4]) + 1
 		if next >= spriteY && next < spriteY+spriteHeight {
 			lookahead++
-			if lookahead >= 9 {
+			if lookahead > maxSpritesPerScanline {
 				p.PPUSTATUS |= PPUSTATUSSpriteOverflow
 				break
 			}
