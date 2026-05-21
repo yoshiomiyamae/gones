@@ -437,6 +437,9 @@ func (m *Mapper5) IsIRQPending() bool {
 	return m.irqPending && m.irqEnable
 }
 
+// IRQCapable marks MMC5 as an IRQ-asserting mapper (scanline-match IRQ).
+func (m *Mapper5) IRQCapable() {}
+
 // ClearIRQ is a no-op for MMC5 — the IRQ status is consumed via $5204
 // reads, which the CPU does explicitly to ack the interrupt.
 func (m *Mapper5) ClearIRQ() {}

@@ -266,12 +266,24 @@ func (a *APU) Step() {
 		a.stepFrameCounter()
 	}
 
-	// Step audio channels - they use their own internal timers now
-	a.stepPulse(&a.Pulse1)
-	a.stepPulse(&a.Pulse2)
-	a.stepTriangle()
-	a.stepNoise()
-	a.stepDMC()
+	// Step audio channels. Each is guarded at the call site so a disabled
+	// channel costs a single bool check rather than a function call that
+	// immediately returns — DMC in particular is off for most games.
+	if a.Pulse1.Enabled {
+		a.stepPulse(&a.Pulse1)
+	}
+	if a.Pulse2.Enabled {
+		a.stepPulse(&a.Pulse2)
+	}
+	if a.Triangle.Enabled {
+		a.stepTriangle()
+	}
+	if a.Noise.Enabled {
+		a.stepNoise()
+	}
+	if a.DMC.Enabled {
+		a.stepDMC()
+	}
 
 	// Generate audio sample with precise fractional timing
 	// NES CPU frequency: 21.477272 MHz / 12 = 1.7897725 MHz (NTSC)

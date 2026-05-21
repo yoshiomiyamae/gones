@@ -83,6 +83,7 @@ func (m *Mapper4) WritePRG(addr uint16, value uint8) {
 		case 0x8000: // Bank select ($8000-$9FFE, even)
 			logger.LogMapper("MMC3 bank select set: %d", value)
 			m.bankSelect = value
+			m.recalcCHRBanks() // CHR mode bit 7 may have flipped
 
 		case 0x8001: // Bank data ($8001-$9FFF, odd)
 			regIndex := m.bankSelect & 0x07
@@ -100,6 +101,7 @@ func (m *Mapper4) WritePRG(addr uint16, value uint8) {
 					}
 				}
 			}
+			m.recalcCHRBanks() // refresh windows for the just-written CHR reg
 
 		case 0xA000: // Mirroring ($A000-$BFFE, even)
 			m.mirroringMode = value & 1
@@ -122,101 +124,61 @@ func (m *Mapper4) WritePRG(addr uint16, value uint8) {
 	}
 }
 
-// ReadCHR reads from CHR ROM/RAM address space
+// ReadCHR reads from CHR ROM/RAM address space via the precomputed per-window
+// offset table (see recalcCHRBanks). CHR ROM takes priority; CHR RAM is the
+// backing store when the cart ships no CHR ROM.
 func (m *Mapper4) ReadCHR(addr uint16) uint8 {
 	if addr >= 0x2000 {
 		return 0
 	}
-
-	// Use common CHR banking calculation
-	bank := m.calculateCHRBank(addr)
-
-	// Handle CHR ROM with banking
-	if len(m.data.CHRROM) > 0 {
-		// Ensure bank is in valid range
-		if m.chrBankCount > 0 {
-			bank %= m.chrBankCount
-		}
-		offset := uint32(bank)*0x400 + uint32(addr&0x3FF)
-		if offset < uint32(len(m.data.CHRROM)) {
-			return m.data.CHRROM[offset]
-		}
+	offset := m.chrWindowOffset[addr>>10] + uint32(addr&0x3FF)
+	if int(offset) < len(m.data.CHRROM) {
+		return m.data.CHRROM[offset]
 	}
-
-	// Handle CHR RAM with banking (32KB support)
-	if len(m.data.CHRRAM) > 0 {
-		if m.chrBankCount > 0 {
-			bank %= m.chrBankCount
-		}
-		offset := uint32(bank)*0x400 + uint32(addr&0x3FF)
-		if offset < uint32(len(m.data.CHRRAM)) {
-			return m.data.CHRRAM[offset]
-		} else {
-			logger.LogMapper("CHR Write ERROR: addr=$%04X, bank=%d, offset=$%06X >= size=%d",
-				addr, bank, offset, len(m.data.CHRRAM))
-		}
+	if int(offset) < len(m.data.CHRRAM) {
+		return m.data.CHRRAM[offset]
 	}
-
 	return 0
 }
 
-// calculateCHRBank calculates the CHR bank number for a given address
-func (m *Mapper4) calculateCHRBank(addr uint16) uint8 {
-	var bank uint8
-	chrMode := (m.bankSelect >> 7) & 1
-
-	if chrMode == 0 {
-		// Mode 0: $0000-$0FFF = R0,R1 (2KB each), $1000-$1FFF = R2,R3,R4,R5 (1KB each)
-		if addr < 0x1000 {
-			if addr < 0x800 {
-				// $0000-$07FF: R0 (2KB bank) - even bank only, lowest bit ignored
-				bank = (m.bankRegisters[0] &^ 1) + uint8(addr/0x400)
-			} else {
-				// $0800-$0FFF: R1 (2KB bank) - even bank only, lowest bit ignored
-				bank = (m.bankRegisters[1] &^ 1) + uint8((addr-0x800)/0x400)
-			}
-		} else {
-			// $1000-$1FFF: R2,R3,R4,R5 (1KB each)
-			regIndex := 2 + (addr-0x1000)/0x400
-			bank = m.bankRegisters[regIndex]
-		}
+// recalcCHRBanks rebuilds chrWindowOffset from bankSelect (CHR mode bit 7) and
+// the CHR bank registers R0-R5. The per-window bank numbers reproduce exactly
+// what the old per-fetch calculateCHRBank produced — including the uint8 bank
+// arithmetic and the `bank %= chrBankCount` clamp (which is skipped when
+// chrBankCount is 0, e.g. a 256KB-CHR cart whose 1KB-bank count wraps uint8).
+// Call after any change to bankSelect or bankRegisters.
+func (m *Mapper4) recalcCHRBanks() {
+	// R0/R1 are 2KB banks: the low bit is ignored and the pair spans two
+	// consecutive 1KB windows (r, r+1).
+	r0, r1 := m.bankRegisters[0]&^1, m.bankRegisters[1]&^1
+	var banks [8]uint8
+	if (m.bankSelect>>7)&1 == 0 {
+		// Mode 0: $0000-$0FFF = R0,R1 (2KB each); $1000-$1FFF = R2..R5 (1KB)
+		banks = [8]uint8{r0, r0 + 1, r1, r1 + 1,
+			m.bankRegisters[2], m.bankRegisters[3], m.bankRegisters[4], m.bankRegisters[5]}
 	} else {
-		// Mode 1: $0000-$0FFF = R2,R3,R4,R5 (1KB each), $1000-$1FFF = R0,R1 (2KB each)
-		if addr < 0x1000 {
-			// $0000-$0FFF: R2,R3,R4,R5 (1KB each)
-			regIndex := 2 + addr/0x400
-			bank = m.bankRegisters[regIndex]
-		} else {
-			if addr < 0x1800 {
-				// $1000-$17FF: R0 (2KB bank) - even bank only, lowest bit ignored
-				bank = (m.bankRegisters[0] &^ 1) + uint8((addr-0x1000)/0x400)
-			} else {
-				// $1800-$1FFF: R1 (2KB bank) - even bank only, lowest bit ignored
-				bank = (m.bankRegisters[1] &^ 1) + uint8((addr-0x1800)/0x400)
-			}
-		}
+		// Mode 1: $0000-$0FFF = R2..R5 (1KB); $1000-$1FFF = R0,R1 (2KB each)
+		banks = [8]uint8{m.bankRegisters[2], m.bankRegisters[3], m.bankRegisters[4], m.bankRegisters[5],
+			r0, r0 + 1, r1, r1 + 1}
 	}
-
-	return bank
+	for w := 0; w < 8; w++ {
+		b := banks[w]
+		if m.chrBankCount > 0 {
+			b %= m.chrBankCount
+		}
+		m.chrWindowOffset[w] = uint32(b) * 0x400
+	}
 }
 
-// WriteCHR writes to CHR ROM/RAM address space
+// WriteCHR writes to CHR RAM (CHR ROM is read-only) via the precomputed
+// per-window offset table.
 func (m *Mapper4) WriteCHR(addr uint16, value uint8) {
 	if addr >= 0x2000 {
 		return
 	}
-
-	// Only CHR RAM is writable - with banking support
 	if len(m.data.CHRRAM) > 0 {
-		// Use common CHR banking calculation
-		bank := m.calculateCHRBank(addr)
-
-		// Ensure bank is in valid range for CHR RAM
-		if m.chrBankCount > 0 {
-			bank %= m.chrBankCount
-		}
-		offset := uint32(bank)*0x400 + uint32(addr&0x3FF)
-		if offset < uint32(len(m.data.CHRRAM)) {
+		offset := m.chrWindowOffset[addr>>10] + uint32(addr&0x3FF)
+		if int(offset) < len(m.data.CHRRAM) {
 			m.data.CHRRAM[offset] = value
 		}
 	}

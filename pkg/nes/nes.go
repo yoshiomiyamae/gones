@@ -36,6 +36,13 @@ type NES struct {
 	// stages are required to hit the right CPU instruction boundary.
 	nmiDelay   bool
 	pendingNMI bool
+
+	// cartHasIRQ mirrors Cartridge.HasIRQ() — true only for mappers that can
+	// assert the CPU IRQ line (MMC3/MMC5/FME-7). Step polls the mapper's
+	// IsIRQPending every instruction; for every other cart this stays false
+	// so that per-instruction interface dispatch is skipped. Set in
+	// LoadCartridge.
+	cartHasIRQ bool
 }
 
 // NewNES creates a new NES instance
@@ -66,6 +73,7 @@ func NewNES() *NES {
 // LoadCartridge loads a cartridge into the NES
 func (n *NES) LoadCartridge(cart *cartridge.Cartridge) {
 	n.Cartridge = cart
+	n.cartHasIRQ = cart.HasIRQ()
 	n.Memory.SetCartridge(cart)
 	n.PPU.SetCartridge(cart)
 	n.APU.SetExpansionAudio(cart)
@@ -108,7 +116,9 @@ func (n *NES) Step() {
 
 	// The CPU instruction may have written $E000 (MMC3 IRQ ack); refresh
 	// the cached mirror so the level-triggered c.IRQ sync below sees it.
-	if n.Cartridge != nil {
+	// Only IRQ-capable mappers can move this line — for every other cart
+	// MapperIRQ stays false, so skip the per-instruction interface dispatch.
+	if n.cartHasIRQ {
 		n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
 	}
 
@@ -149,7 +159,9 @@ func (n *NES) Step() {
 	// CPU-rate mapper timers (FME-7's IRQ counter).
 	if n.Cartridge != nil {
 		n.Cartridge.TickCPU(cpuCycles)
-		n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
+		if n.cartHasIRQ {
+			n.PPU.MapperIRQ = n.Cartridge.IsIRQPending()
+		}
 	}
 
 	// Level-triggered IRQ — OR together every line tied to the 6502's IRQ

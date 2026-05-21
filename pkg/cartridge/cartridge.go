@@ -37,6 +37,12 @@ type Cartridge struct {
 	// whether to route CPU R/W there to the mapper or leave open bus.
 	hasExpansion bool
 
+	// hasIRQ is true when the mapper can assert the CPU IRQ line (it
+	// implements mapper.IRQCapable). nes.Step polls IsIRQPending every
+	// instruction; for carts whose mapper can never IRQ this stays false so
+	// that poll is skipped entirely.
+	hasIRQ bool
+
 	// spriteCHRReader caches the optional mapper.SpriteCHRReader
 	// assertion. When set, sprite pattern fetches route here instead
 	// of through ReadCHR — used by MMC5's dual CHR set in 8×16 mode.
@@ -180,9 +186,17 @@ func LoadFromReader(reader io.Reader) (*Cartridge, error) {
 	if n, ok := cart.Mapper.(mapper.ScanlineNotifier); ok {
 		cart.scanlineNotifier = n
 	}
+	if _, ok := cart.Mapper.(mapper.IRQCapable); ok {
+		cart.hasIRQ = true
+	}
 
 	return cart, nil
 }
+
+// HasIRQ reports whether the mapper can assert the CPU IRQ line. False for
+// mappers (NROM, UxROM, CNROM, …) that never IRQ, letting nes.Step skip its
+// per-instruction IsIRQPending poll for those carts.
+func (c *Cartridge) HasIRQ() bool { return c.hasIRQ }
 
 // HasExpansion reports whether the mapper decodes the $4020-$5FFF
 // cartridge-expansion window.

@@ -5,7 +5,7 @@ package mapper
 //   - mapper4.go        : Mapper4 struct, constructor, Step(), mirroring,
 //                         debug helpers, SaveState/LoadState.
 //   - mapper4_banks.go  : PRG/CHR bank mapping (ReadPRG/WritePRG/ReadCHR/
-//                         WriteCHR/calculateCHRBank). WritePRG hosts the
+//                         WriteCHR/recalcCHRBanks). WritePRG hosts the
 //                         outer $E001 switch and delegates IRQ-register
 //                         arms to helpers in mapper4_irq.go.
 //   - mapper4_irq.go    : A12 IRQ notification stub, IRQ register-write
@@ -53,6 +53,14 @@ type Mapper4 struct {
 	// Bank counts
 	prgBankCount uint8
 	chrBankCount uint8
+
+	// chrWindowOffset holds the byte offset into the CHR backing array for
+	// each of the eight 1KB CHR windows ($0000-$1FFF). The MMC3 CHR mapping
+	// only changes on $8000 (bank select / mode) and $8001 (bank data)
+	// writes, so resolving it per fetch is wasted work — ReadCHR/WriteCHR
+	// index this table instead. Rebuilt by recalcCHRBanks at init, on those
+	// writes, and after LoadState.
+	chrWindowOffset [8]uint32
 }
 
 // NewMapper4 creates a new MMC3 mapper instance
@@ -93,6 +101,8 @@ func NewMapper4(data *CartridgeData) *Mapper4 {
 	}
 
 	logger.LogInfo("CHR RAM initialized: size=%d bytes", len(data.CHRRAM))
+
+	m.recalcCHRBanks()
 
 	return m
 }
@@ -243,5 +253,6 @@ func (m *Mapper4) LoadState(r io.Reader) error {
 	m.irqEnabled = s.IrqEnabled
 	m.irqPending = s.IrqPending
 	m.irqReloadFlag = s.IrqReloadFlag
+	m.recalcCHRBanks() // rebuild window table from restored bank registers
 	return nil
 }

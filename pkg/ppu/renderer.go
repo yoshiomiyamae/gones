@@ -105,37 +105,6 @@ func getPixelColor(patternLo, patternHi uint8, pixelX int) uint8 {
 	return colorIndex
 }
 
-// bgTileAt returns the background tile for screen-tile-column tileX,
-// refetching whenever tileX changes since the last call (and at scanline
-// start via the currentBGTileX = -1 reset). The fetch uses the live
-// PPUCTRL.BGTable / v / x state, so a $2000 / $2005 / $2006 write inside
-// a scanline propagates to subsequent tiles — see PPU.currentBGTile.
-func (p *PPU) bgTileAt(tileX int) BackgroundTile {
-	if tileX != p.currentBGTileX {
-		p.currentBGTile = p.fetchBackgroundTileWithScroll(tileX)
-		p.currentBGTileX = tileX
-	}
-	return p.currentBGTile
-}
-
-// bgPixelAt returns the background pixel at screen x as both its 2-bit
-// pattern color-index (0 = transparent, used for sprite priority / sprite-0
-// hit) and its resolved ARGB color. The caller needs both, so they're
-// computed together to decode the tile only once. When BG is disabled or
-// left-clipped the pixel is transparent (index 0) showing the backdrop.
-func (p *PPU) bgPixelAt(x int) (uint8, uint32) {
-	if p.PPUMASK&PPUMASKBGShow == 0 {
-		return 0, p.PaletteManager.GetBackgroundColor(0, 0)
-	}
-	if x < 8 && p.PPUMASK&PPUMASKBGLeft == 0 {
-		return 0, p.PaletteManager.GetBackgroundColor(0, 0)
-	}
-	adjustedX := x + int(p.x)
-	tile := p.bgTileAt(adjustedX / 8)
-	colorIndex := getPixelColor(tile.PatternLo, tile.PatternHi, adjustedX&7)
-	return colorIndex, p.PaletteManager.GetBackgroundColor(tile.Attributes, colorIndex)
-}
-
 // evaluateSprites fills currentSprites/currentSpriteCount with the (up to 8)
 // sprites overlapping scanline, pre-fetching each one's pattern-row bytes, and
 // runs the next-scanline sprite-overflow evaluation that the PPU does during
@@ -274,27 +243,39 @@ func (p *PPU) spritePixelAt(x int) (uint32, bool, bool) {
 	return 0x00000000, false, false
 }
 
-// renderPixel renders a single pixel combining background and sprites
+// renderPixel renders a single pixel combining background and sprites. The
+// caller (PPU.Step) guarantees Scanline ∈ [0,240) and Cycle ∈ [0,256), so no
+// bounds check is needed here.
 func (p *PPU) renderPixel() {
-	if p.Scanline < 0 || p.Scanline >= 240 || p.Cycle < 0 || p.Cycle >= 256 {
-		return
-	}
-
 	x := p.Cycle
 	y := p.Scanline
 	index := y*256 + x
 
-	if !p.renderingEnabled() {
+	if !p.renderEnabled {
 		// Rendering disabled, just set background color
 		p.FrameBuffer[index] = p.PaletteManager.GetBackgroundColor(0, 0)
 		return
 	}
 
-	// Render background pixel — fetches the tile lazily so mid-scanline
-	// $2000/$2005/$2006 writes propagate to subsequent tiles. bgColorIndex
-	// (0 = transparent) drives sprite priority / sprite-0 hit; reusing it
-	// avoids decoding the BG tile a second time.
-	bgColorIndex, bgColor := p.bgPixelAt(x)
+	// Background pixel. The tile is fetched lazily and cached, refetching only
+	// when crossing an 8-pixel boundary so a mid-scanline $2000/$2005/$2006
+	// write propagates to later tiles. bgColorIndex (0 = transparent) drives
+	// sprite priority / sprite-0 hit and is reused below so the tile is decoded
+	// only once. BG off or left-clip shows the backdrop as transparent index 0.
+	var bgColorIndex uint8
+	var bgColor uint32
+	if p.PPUMASK&PPUMASKBGShow == 0 || (x < 8 && p.PPUMASK&PPUMASKBGLeft == 0) {
+		bgColor = p.PaletteManager.GetBackgroundColor(0, 0)
+	} else {
+		adjustedX := x + int(p.x)
+		if tileX := adjustedX >> 3; tileX != p.currentBGTileX {
+			p.currentBGTile = p.fetchBackgroundTileWithScroll(tileX)
+			p.currentBGTileX = tileX
+		}
+		t := &p.currentBGTile
+		bgColorIndex = getPixelColor(t.PatternLo, t.PatternHi, adjustedX&7)
+		bgColor = p.PaletteManager.GetBackgroundColor(t.Attributes, bgColorIndex)
+	}
 
 	// Evaluate sprites once per scanline (fetches each sprite's pattern row).
 	if p.Cycle == 0 {

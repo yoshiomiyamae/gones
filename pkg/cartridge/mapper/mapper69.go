@@ -189,6 +189,9 @@ func (m *Mapper69) AudioSample() float32 {
 func (m *Mapper69) IsIRQPending() bool { return m.irqPending }
 func (m *Mapper69) ClearIRQ()          { m.irqPending = false }
 
+// IRQCapable marks FME-7 as an IRQ-asserting mapper (CPU-clock counter).
+func (m *Mapper69) IRQCapable() {}
+
 // GetMirroringMode reports the current mapper-controlled mirroring in
 // the PPU's encoding (0=horizontal, 1=vertical, 2/3=single-screen
 // lower/upper). FME-7 reg-12 codes: 0=vert, 1=horiz, 2=lower, 3=upper.

@@ -93,6 +93,16 @@ type MirroringSource interface {
 	GetMirroringMode() uint8
 }
 
+// IRQCapable is a marker interface implemented only by mappers that can
+// assert the CPU IRQ line (MMC3, MMC5, FME-7). Every mapper satisfies the
+// base Mapper.IsIRQPending(), so that method can't discriminate; this marker
+// lets the cartridge layer learn at load time whether IsIRQPending is worth
+// polling. nes.Step skips its per-instruction mapper-IRQ poll for carts whose
+// mapper doesn't implement this.
+type IRQCapable interface {
+	IRQCapable()
+}
+
 // CartridgeData contains cartridge data for mappers
 type CartridgeData struct {
 	PRGROM []uint8

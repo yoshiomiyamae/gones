@@ -52,6 +52,18 @@ type PPU struct {
 	// Set on PPUMASK render-off→on; cleared after one $1000-mode tick.
 	mmc3FirstClockPending bool
 
+	// renderEnabled caches PPUMASK's BG/sprite-show bits — the same value
+	// renderingEnabled() computes — so the per-cycle hot path in Step skips
+	// re-reading PPUMASK every cycle. Kept in sync wherever PPUMASK changes:
+	// the $2001 write, Reset, and LoadState.
+	renderEnabled bool
+
+	// mapperTickCycle is the PPU cycle on which the MMC3 IRQ counter is
+	// clocked for the current PPUCTRL.BGTable setting (273 for BG=$0000,
+	// 337 for BG=$1000). Recomputed only on $2000 write / Reset / LoadState
+	// so Step's per-cycle MMC3 path is a single compare. See Step.
+	mapperTickCycle int
+
 	// vblSuppressed records a $2002 read that landed in the race window
 	// where the VBL flag is about to be set. On real hardware a read
 	// straddling the set cycle suppresses both the flag set and the NMI
@@ -215,8 +227,21 @@ func New(mem *memory.Memory) *PPU {
 		Memory:         mem,
 		Cycle:          0,
 		Scanline:       0,
-		PaletteManager: NewPaletteManager(),
-		currentBGTileX: -1,
+		PaletteManager:  NewPaletteManager(),
+		currentBGTileX:  -1,
+		mapperTickCycle: 273, // BG=$0000 default; refreshed on $2000 write
+	}
+}
+
+// refreshDerivedCtrl recomputes the PPUMASK/PPUCTRL-derived hot-path fields
+// (renderEnabled, mapperTickCycle) that Step reads every cycle. Called from
+// every site that changes PPUMASK or PPUCTRL ($2000/$2001 writes, Reset,
+// LoadState) so the caches never diverge from the live registers.
+func (p *PPU) refreshDerivedCtrl() {
+	p.renderEnabled = p.renderingEnabled()
+	p.mapperTickCycle = 273
+	if p.PPUCTRL&PPUCTRLBGTable != 0 {
+		p.mapperTickCycle = 337
 	}
 }
 
@@ -234,6 +259,7 @@ func (p *PPU) Reset() {
 	p.Scanline = 0
 	p.FrameComplete = false
 	p.currentBGTileX = -1
+	p.refreshDerivedCtrl()
 	// PPUMASK was just cleared; keep the palette emphasis in sync with it
 	// (emphasis is only updated on $2001 writes, not derived per-cycle).
 	if p.PaletteManager != nil {
@@ -275,8 +301,10 @@ func (p *PPU) Step() {
 		}
 	}
 
-	// Render visible scanlines
-	if p.Scanline >= 0 && p.Scanline < 240 {
+	// Render visible pixels only — cycles 256-340 of a visible scanline
+	// produce no output, so gating the call here skips ~85 no-op renderPixel
+	// calls per scanline instead of paying the call + early-return.
+	if p.Scanline >= 0 && p.Scanline < 240 && p.Cycle < 256 {
 		p.renderPixel()
 	}
 
@@ -285,10 +313,14 @@ func (p *PPU) Step() {
 	// writes propagate for split-screen effects (e.g. SMB3 title screen) — the
 	// renderer reads v.coarseY/fineY as the *current* scanline's row, not a
 	// frame-start scroll.
-	renderingActive := (p.Scanline >= 0 && p.Scanline < 240 || p.Scanline == -1) && p.renderingEnabled()
+	// renderingActive ⇔ on a render-producing scanline (pre-render -1 .. 239)
+	// with rendering enabled. Scanline is always ≥ -1, so the lower bound is
+	// implicit and this reduces to a single compare against the cached flag.
+	renderingActive := p.Scanline < 240 && p.renderEnabled
 	if renderingActive && p.Cartridge != nil {
 		// MMC3 IRQ clocking — A12 rising edges with a ~3-CPU-cycle low
-		// filter. We pick the PPU cycle of the counted rise from PPUCTRL:
+		// filter. The counted rise's PPU cycle depends on PPUCTRL.BGTable
+		// (cached in mapperTickCycle):
 		//   BG=$0000, Sprites=$1000: first sprite-pattern fetch (~261);
 		//     empirically cycle 273 matches blargg scanline_timing.
 		//   BG=$1000, Sprites=$0000: prefetch BG-pattern fetch after the
@@ -297,14 +329,9 @@ func (p *PPU) Step() {
 		// after PPUMASK 0→on (the render-off period satisfies the filter
 		// for the first BG-pattern fetch at cycle ~5 / emu cycle 17;
 		// subsequent cycle-5 rises are filtered out by the short
-		// inter-scanline low gap).
-		bg1000 := p.PPUCTRL&PPUCTRLBGTable != 0
-		tickPerScanline := 273
-		if bg1000 {
-			tickPerScanline = 337
-		}
-		clockMapper := p.Cycle == tickPerScanline
-		if !clockMapper && p.mmc3FirstClockPending && bg1000 && p.Cycle == 17 {
+		// inter-scanline low gap). bg1000 ⇔ mapperTickCycle == 337.
+		clockMapper := p.Cycle == p.mapperTickCycle
+		if !clockMapper && p.mmc3FirstClockPending && p.mapperTickCycle == 337 && p.Cycle == 17 {
 			clockMapper = true
 			p.mmc3FirstClockPending = false
 		}
@@ -736,6 +763,7 @@ func (p *PPU) LoadState(r io.Reader) error {
 	p.oddFrame = s.OddFrame
 	p.VRAM = s.VRAM
 	p.OAM = s.OAM
+	p.refreshDerivedCtrl() // PPUCTRL/PPUMASK restored above; resync caches
 	if p.PaletteManager != nil {
 		p.PaletteManager.PaletteRAM = s.PaletteRAM
 		p.PaletteManager.Emphasis = s.PaletteEmphasis

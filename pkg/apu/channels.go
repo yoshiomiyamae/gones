@@ -35,12 +35,8 @@ func tickTimer(timer *uint16, reload uint16) bool {
 	return false
 }
 
-// stepPulse steps a pulse channel
+// stepPulse steps a pulse channel. Caller (APU.Step) guards on pulse.Enabled.
 func (a *APU) stepPulse(pulse *PulseChannel) {
-	if !pulse.Enabled {
-		return
-	}
-
 	// Pulse channels are clocked at CPU rate / 2
 	// This means the timer decrements every 2 CPU cycles
 	// Frequency formula: CPU_FREQ / (16 * (timer + 1))
@@ -56,12 +52,8 @@ func (a *APU) stepPulse(pulse *PulseChannel) {
 	}
 }
 
-// stepTriangle steps the triangle channel
+// stepTriangle steps the triangle channel. Caller guards on Triangle.Enabled.
 func (a *APU) stepTriangle() {
-	if !a.Triangle.Enabled {
-		return
-	}
-
 	// Triangle channel timer counts down every CPU cycle
 	// Frequency = CPU_CLOCK / (32 * (t + 1))
 	if tickTimer(&a.Triangle.Timer, a.Triangle.TimerValue) {
@@ -71,12 +63,8 @@ func (a *APU) stepTriangle() {
 	}
 }
 
-// stepNoise steps the noise channel
+// stepNoise steps the noise channel. Caller guards on Noise.Enabled.
 func (a *APU) stepNoise() {
-	if !a.Noise.Enabled {
-		return
-	}
-
 	if tickTimer(&a.Noise.Timer, a.Noise.TimerValue) {
 		// Step LFSR
 		bit := uint16(0)
@@ -96,9 +84,7 @@ func (a *APU) stepNoise() {
 // of 16 periods from dmcRates (Rate 0 = slowest = 428 CPU cycles, NOT
 // "disabled"), so the condition has to fire even when Rate==0.
 func (a *APU) stepDMC() {
-	if !a.DMC.Enabled {
-		return
-	}
+	// Caller (APU.Step) guards on DMC.Enabled.
 	// reload = period-1 clocks the sample unit once every `period` CPU
 	// cycles; a $4010 rate change takes effect at the next reload, as on
 	// hardware (the in-flight count finishes first).

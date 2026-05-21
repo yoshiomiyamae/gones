@@ -80,6 +80,9 @@ func (m *Mapper4) IsIRQPending() bool {
 	return m.irqPending
 }
 
+// IRQCapable marks MMC3 as an IRQ-asserting mapper (scanline counter).
+func (m *Mapper4) IRQCapable() {}
+
 // ClearIRQ clears the pending IRQ
 func (m *Mapper4) ClearIRQ() {
 	m.irqPending = false

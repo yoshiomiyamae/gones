@@ -92,6 +92,7 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 	case 0x2000: // PPUCTRL
 		oldValue := p.PPUCTRL
 		p.PPUCTRL = value
+		p.refreshDerivedCtrl() // BGTable bit feeds mapperTickCycle
 		p.t = (p.t & 0xF3FF) | ((uint16(value) & 0x03) << 10)
 		if logger.PPUEnabled() {
 			logger.LogPPU("Write PPUCTRL: $%02X -> $%02X (NMI=%v, BG_table=$%04X, Sprite_table=$%04X)",
@@ -120,6 +121,7 @@ func (p *PPU) WriteRegister(addr uint16, value uint8) {
 				oldValue, value, (value&PPUMASKBGShow) != 0, (value&PPUMASKSpriteShow) != 0, (value&PPUMASKGreyscale) != 0)
 		}
 		p.PPUMASK = value
+		p.refreshDerivedCtrl() // BG/sprite-show bits feed renderEnabled
 		// Emphasis (PPUMASK bits 5-7) feeds the palette ARGB LUT index. Set
 		// it here on the write instead of re-deriving it every PPU cycle.
 		p.PaletteManager.SetEmphasis(value & 0xE0)
