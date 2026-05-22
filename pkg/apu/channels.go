@@ -330,15 +330,3 @@ func (a *APU) stepLinearCounter() {
 	}
 }
 
-// frameSequencerStep performs quarter frame and half frame operations
-func (a *APU) frameSequencerStep(quarter, half bool) {
-	if quarter {
-		a.stepEnvelopes()
-		a.stepLinearCounter()
-	}
-
-	if half {
-		a.stepLengthCounters()
-		a.stepSweeps()
-	}
-}
